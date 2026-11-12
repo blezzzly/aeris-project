@@ -331,6 +331,10 @@ class _ClientSession:
         self.manager.close_codes[code] = self.manager.close_codes.get(code, 0) + 1
         self.manager.last_close_reason = reason
         self.manager.last_close_at = datetime.now().isoformat()
+        print(
+            f"[WS] client closed code={code} reason={reason} "
+            f"active={len(self.manager.active_connections)}"
+        )
 
         task = self.writer_task
         if task is not None and task is not asyncio.current_task():
@@ -577,6 +581,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # Send current real telemetry state immediately on connect.
             {"type": "telemetry", **telemetry_data},
         ])
+        print(f"[WS] client accepted role={role} active={len(manager.active_connections)}")
         while True:
             data = await websocket.receive_text()
             try:
