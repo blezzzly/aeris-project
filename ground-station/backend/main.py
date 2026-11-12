@@ -2060,15 +2060,16 @@ async def startup():
     print("[Bus] I2C/SPI monitor started")
     # Real CPU utilisation sampler (the load average is not a percentage).
     threading.Thread(target=_cpu_monitor_loop, daemon=True, name="aeris-cpu-monitor").start()
-    # Start the real hardware sensor poller (GPS, battery, barometer, compass,
-    # LoRa radio identity). It publishes into telemetry_data and the WebSocket.
-    if _SENSORS_AVAILABLE:
-        threading.Thread(target=_sensor_poll_loop, daemon=True, name="aeris-sensors").start()
-        print("[Sensors] hardware sensor poller started")
     # Start the ground-side LoRa receiver (real hardware; starts in real
     # RX CONTINUOUS mode on 433 MHz; safe with no drone transmitting).
     # A second instance on the same Pi would fight the primary for the radio
     # (one NSS line, one FIFO), so secondary instances must not claim it.
+    #
+    # ORDER MATTERS: the receiver is started BEFORE the sensor poller. The
+    # poller probes the radio identity (including Reg 0x39, the sync word)
+    # straight away - if it ran first it would read whatever the radio still
+    # held from a previous process and report a stale sync word until the
+    # next 60 s re-probe.
     _skip_lora_rx = (os.environ.get("AERIS_SKIP_LORA_RX") or "").strip().lower() in ("1", "true", "yes")
     if _lora_rx_svc is not None and _skip_lora_rx:
         print("[LoRaRX] skipped (AERIS_SKIP_LORA_RX set - another instance owns the radio)")
@@ -2076,11 +2077,22 @@ async def startup():
         try:
             started = _lora_rx_svc.start()
             if started:
-                print("[LoRaRX] ground-side receiver started — listening on 433 MHz (SF6/BW500, sync 0x34, matching the drone transmitter)")
+                _lora_status = _lora_rx_svc.get_status()
+                _lora_sync = _lora_status.get("sync_word")
+                print(
+                    "[LoRaRX] ground-side receiver started - listening on 433 MHz "
+                    "(SF6/BW500, CR4/5, sync "
+                    f"{_lora_sync if _lora_sync else 'n/a'}, matching the drone transmitter)"
+                )
             else:
                 print(f"[LoRaRX] not started: {_lora_rx_svc.get_status().get('reason')}")
         except Exception as _lrx_err:
             print(f"[LoRaRX] start failed: {_lrx_err}")
+    # Start the real hardware sensor poller (GPS, battery, barometer, compass,
+    # LoRa radio identity). It publishes into telemetry_data and the WebSocket.
+    if _SENSORS_AVAILABLE:
+        threading.Thread(target=_sensor_poll_loop, daemon=True, name="aeris-sensors").start()
+        print("[Sensors] hardware sensor poller started")
 
 
 @app.on_event("shutdown")
