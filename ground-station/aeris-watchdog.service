@@ -1,0 +1,19 @@
+[Unit]
+Description=AERIS Watchdog - periodic self-healing check of the ground station
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+# Runs after the stack is up. It never blocks the boot: it is a timer, not a
+# boot-time requirement.
+After=aeris.target
+Wants=aeris.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/aeris/aeris.env
+ExecStart=/home/piaeris/aeris-project/ground-station/watchdog.sh
+# The watchdog repairs the stack, so a failing run must not be retried in a
+# tight loop - the timer provides the next attempt.
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeris-watchdog

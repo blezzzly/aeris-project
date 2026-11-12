@@ -36,7 +36,7 @@ VITAL_SIGNS_RANGE = {
 }
 
 # Simulated LoRa transmission parameters
-LORA_FREQUENCY_MHZ = 915.0
+LORA_FREQUENCY_MHZ = 433.0
 LORA_RSSI_RANGE    = (-90, -50)   # dBm
 LORA_SNR_RANGE     = (5.0, 12.0)  # dB
 

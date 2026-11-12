@@ -3,7 +3,7 @@
   "buildCommand": "cd ground-station/frontend && npm run build",
   "outputDirectory": "ground-station/frontend/dist",
   "installCommand": "cd ground-station/frontend && npm install",
-  "devCommand": "cd ground-station/frontend && npm run dev",
+  "devCommand": "cd ground-station/frontend && npm run dev:frontend",
   "routes": [
     { "src": "/(.*)", "dest": "/ground-station/frontend/dist/$1" }
   ]

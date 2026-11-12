@@ -1,0 +1,42 @@
+[Unit]
+Description=AERIS Onboard Detection Pipeline (Raspberry Pi 4B - drone companion computer)
+Documentation=file:///home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b/README.md
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+After=network-online.target
+Wants=network-online.target
+# The ground station backend and the onboard pipeline talk to the SAME
+# physical sensors on a Raspberry Pi (MLX90640 on I2C1 @ 0x33, SX1278 on
+# SPI0). Only one of them can own them at a time - the ground station
+# receives LoRa, the onboard transmits it. "Conflicts" makes systemd refuse
+# to run both on one device instead of silently corrupting the radio.
+Conflicts=aeris-backend.service
+# Never give up restarting the pipeline: it must come back on every reboot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The pipeline drives I2C, SPI and GPIO directly, so it needs root.
+User=root
+WorkingDirectory=/home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=OPENCV_LOG_LEVEL=SILENT
+Environment=TENSOR_CPP_MIN_LOG_LEVEL=3
+# Fail fast with a clear message in the journal instead of a traceback.
+ExecStartPre=/usr/bin/test -x /home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b/venv/bin/python
+ExecStartPre=/usr/bin/test -f /home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b/main.py
+ExecStart=/home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b/venv/bin/python -u main.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=yes
+# The detection pipeline is the payload of the device - give it priority over
+# the desktop.
+CPUWeight=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeris-onboard
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,8 @@ import { LiveFeed } from '../components/LiveFeed';
 import { MissionMap } from '../components/MissionMap';
 import { CommLinkHealth } from '../components/CommLinkHealth';
 import { DetectionsTable } from '../components/DetectionsTable';
-import { ActiveMission } from '../components/ActiveMission';
+import { ThermalAnalytics } from '../components/ThermalAnalytics';
+import { HardwareStatus } from '../components/HardwareStatus';
 
 export function Dashboard() {
   return (
@@ -14,10 +15,15 @@ export function Dashboard() {
         <CommLinkHealth />
       </div>
 
-      {/* Bottom Row: Detections Table & Mission Info */}
+      {/* Bottom Row: Detections Table & real hardware status */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 flex-1 min-h-[400px] lg:min-h-0 overflow-hidden">
         <DetectionsTable />
-        <ActiveMission />
+        {/* Live hardware panels - every value is a real measurement reported
+            by the ground station (thermal sensor, buses, LoRa radio). */}
+        <div className="lg:col-span-5 flex flex-col gap-4 overflow-y-auto">
+          <ThermalAnalytics />
+          <HardwareStatus />
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,16 @@
+[Unit]
+Description=AERIS Ground Station (complete stack)
+Documentation=file:///home/piaeris/aeris-project/README.md
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+# The stack needs a routable network before it can serve anything.
+Wants=network-online.target
+After=network-online.target
+# The hotspot guard is ordered first: it is the unit that heals the Wi-Fi AP,
+# so it has to be running before the backend advertises the dashboard.
+Wants=aeris-hotspot-guard.service
+After=aeris-hotspot-guard.service
+Wants=aeris-backend.service
+After=aeris-backend.service
+
+[Install]
+WantedBy=multi-user.target

@@ -39,6 +39,7 @@ class DashboardState:
     def __init__(self):
         self.lock = threading.Lock()
         self.frame = None               # latest camera frame (BGR)
+        self.thermal_frame = None      # latest thermal frame (BGR display)
         self.detections: list[dict] = []
         self.vital_signs: dict | None = None
         self.latest_packet: dict | None = None
@@ -61,9 +62,17 @@ class DashboardState:
         with self.lock:
             self.frame = frame.copy()
 
+    def update_thermal_frame(self, frame: np.ndarray):
+        with self.lock:
+            self.thermal_frame = frame.copy()
+
     def get_frame(self):
         with self.lock:
             return None if self.frame is None else self.frame.copy()
+
+    def get_thermal_frame(self):
+        with self.lock:
+            return None if self.thermal_frame is None else self.thermal_frame.copy()
 
     def update_detection(self, detections: list, vital_signs: dict | None,
                          packet: dict | None, packet_count: int):
@@ -334,6 +343,46 @@ def video_feed():
                         jpeg.tobytes() + b"\r\n"
                     )
             time.sleep(0.033)  # ~30 fps max
+    return Response(
+        generate(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/thermal_feed")
+def thermal_feed():
+    """MJPEG stream of the MLX90640 thermal frame with thermal colormap overlay."""
+
+    def generate():
+        while True:
+            frame = state.get_thermal_frame()
+            if frame is not None:
+                # Thermal frame: float32 matrix (24x32) -> normalized uint8 -> BGR display
+                thermal = frame.copy()
+                min_t = float(np.min(thermal))
+                max_t = float(np.max(thermal))
+                norm = np.clip(
+                    (thermal - min_t) / (max_t - min_t + 1e-5) * 255,
+                    0, 255,
+                ).astype(np.uint8)
+                display = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+                h, w = display.shape[:2]
+                cv2.putText(
+                    display, "DRRM GROUND STATION — THERMAL (MLX90640)",
+                    (10, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                ret, jpeg = cv2.imencode(
+                    ".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 70]
+                )
+                if ret:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" +
+                        jpeg.tobytes() + b"\r\n"
+                    )
+            time.sleep(0.033)  # ~30 fps max
+
     return Response(
         generate(),
         mimetype="multipart/x-mixed-replace; boundary=frame",

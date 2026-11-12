@@ -7,9 +7,10 @@
     "dev": "vite",
     "dev:full": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\"",
     "dev:frontend": "vite",
-    "dev:backend": "cd ../backend && uvicorn main:app --reload --port 8000",
-    "install:all": "npm install && cd ../backend && pip install -r requirements.txt",
+    "dev:backend": "cd ../backend && (test -x venv/bin/uvicorn && venv/bin/uvicorn main:app --reload --port 8000 || python3 -m uvicorn main:app --reload --port 8000)",
+    "install:all": "npm install && cd ../backend && (test -x venv/bin/python || python3 -m venv venv) && venv/bin/pip install -r requirements.txt",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
     "lint": "oxlint",
     "preview": "vite preview"
   },

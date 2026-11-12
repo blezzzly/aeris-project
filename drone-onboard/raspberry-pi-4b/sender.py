@@ -14,6 +14,10 @@ import random
 import logging
 from utils import LORA_HOST, LORA_PORT, LORA_RSSI_RANGE, LORA_SNR_RANGE
 
+# Real SX1278 LoRa radio via SPI (Raspberry Pi 4 Model B, CE0 on GPIO8)
+from SX127x.LoRa import *
+from SX127x.board_config import BOARD
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,3 +112,152 @@ class LoRaSender:
                 pass
             self._sock = None
             logger.info("[LoRaSender] Socket closed.")
+
+
+class FastLoRaTransmitter(LoRa):
+    """
+    Real SX1278 LoRa transmitter (SPI on Raspberry Pi 4 Model B, CE0 = GPIO8).
+
+    Implements the high-performance thermal transmission strategy from the
+    AERIS thesis ("project thesis thermal camera.docx"):
+
+    - LoRa radio tuning: BW = 500 kHz, SF = 6, Explicit Header
+      (~21.8 kbps max throughput).
+    - Thermal compression: float32 -> 8-bit dynamic normalized frames
+      (32x24 grid), packed into two ultra-fast LoRa packets.
+
+    Warning: never power on the LoRa module without its antenna connected —
+    operating without an antenna damages the RF power amplifier.
+    """
+
+    def __init__(self):
+        # Thesis wiring schema (project thesis thermal camera.docx):
+        #   NSS/CS -> GPIO24 (Pin 18), RESET -> GPIO23 (Pin 16), DIO0 -> GPIO18 (Pin 12).
+        # SX1278 requires a RESET pulse and CS deasserted between transactions.
+        import RPi.GPIO as _GPIO
+        import spidev as _spidev
+        import time as _time
+        _GPIO.setmode(_GPIO.BCM)
+        _GPIO.setup(23, _GPIO.OUT)  # RESET
+        _GPIO.setup(24, _GPIO.OUT)  # NSS
+        _GPIO.output(23, _GPIO.LOW)
+        _time.sleep(0.05)
+        _GPIO.output(23, _GPIO.HIGH)
+        _time.sleep(0.05)
+
+        class _ThesisSpi:
+            """SPI wrapper asserting NSS (GPIO24) around every transaction."""
+            def __init__(self):
+                self._s = _spidev.SpiDev()
+                self._s.open(0, 0)
+                self._s.max_speed_hz = 1000000
+                self._s.no_cs = True
+                _GPIO.output(24, _GPIO.HIGH)
+            def xfer(self, data):
+                _GPIO.output(24, _GPIO.LOW)
+                try:
+                    return self._s.xfer(data)
+                finally:
+                    _GPIO.output(24, _GPIO.HIGH)
+            def close(self):
+                try:
+                    self._s.close()
+                except Exception:
+                    pass
+        _spi = _ThesisSpi()
+        BOARD.spi = _spi
+        LoRa.spi = _spi
+        # LoRa.py uses board_config_ada.BOARD (a distinct class); patch that one too.
+        from SX127x import board_config_ada as _ada
+        _ada.BOARD.spi = _spi
+        # GPIO edge detection unavailable on this kernel; TX completion is polled
+        # via SPI register reads (get_irq_flags), so DIO interrupt registration is a no-op.
+        BOARD.add_event_detect = staticmethod(lambda *a, **k: None)
+        _ada.BOARD.add_event_detect = staticmethod(lambda *a, **k: None)
+        super().__init__(verbose=False, do_calibration=False)
+        self.set_mode(MODE.SLEEP)
+        self.set_dio_mapping([0, 0, 0, 0, 0, 0])
+        # Frequency: 433 MHz (physical Ra-02 module band)
+        self.set_freq(433.0)
+        self.set_bw(BW.BW500)              # 500 kHz bandwidth for max bitrate
+        self.set_spreading_factor(6)  # SF6 = fast packet delivery
+        self.set_coding_rate(CODING_RATE.CR4_5)
+        self.set_preamble(6)
+        self.set_rx_crc(True)
+
+    # Real TX state (surfaced to the ground station via status file; never treated as "connected" without ACK)
+    _tx_state = "waiting"  # waiting | sending | error
+    _tx_last_start = None
+    _tx_last_ok = None
+    _tx_last_error = None
+    _tx_ok_count = 0
+    _tx_err_count = 0
+    _ack_received = False  # no ACK protocol exists; stays False
+    STATUS_PATH = "/tmp/opencode/lora_tx_status.json"
+
+    @classmethod
+    def _write_status(cls):
+        import json as _json
+        from datetime import datetime, timezone
+        try:
+            with open(cls.STATUS_PATH, "w") as f:
+                _json.dump({
+                    "state": cls._tx_state,
+                    "last_start": cls._tx_last_start,
+                    "last_ok": cls._tx_last_ok,
+                    "last_error": cls._tx_last_error,
+                    "tx_ok_count": cls._tx_ok_count,
+                    "tx_err_count": cls._tx_err_count,
+                    "ack_received": cls._ack_received,
+                    "written_at": datetime.now(timezone.utc).isoformat(),
+                }, f)
+        except Exception:
+            pass
+
+    def close(self):
+        """Release SPI/GPIO resources held by the SX127x driver."""
+        try:
+            BOARD.teardown()
+        except Exception:
+            pass
+        try:
+            import RPi.GPIO as _GPIO
+            _GPIO.cleanup()
+        except Exception:
+            pass
+
+    def transmit_packet(self, payload: list) -> bool:
+        """
+        Transmit a LoRa packet (list of bytes) using the fast TX path.
+        Returns True ONLY if the radio reports tx_done before the timeout.
+        """
+        type(self)._tx_state = "sending"
+        type(self)._tx_last_start = time.time()
+        type(self)._write_status()
+        try:
+            self.set_mode(MODE.STDBY)
+            self.write_payload(payload)
+            self.set_mode(MODE.TX)
+
+            start_time = time.time()
+            while self.get_irq_flags()['tx_done'] == 0:
+                if time.time() - start_time > 1.0:
+                    type(self)._tx_err_count += 1
+                    type(self)._tx_last_error = f"tx_done timeout after 1.0s"
+                    type(self)._tx_state = "error"
+                    type(self)._write_status()
+                    return False
+                time.sleep(0.001)
+            self.clear_irq_flags(TxDone=1)
+            type(self)._tx_ok_count += 1
+            type(self)._tx_last_ok = time.time()
+            type(self)._tx_last_error = None
+            type(self)._tx_state = "waiting"
+            type(self)._write_status()
+            return True
+        except Exception as e:
+            type(self)._tx_err_count += 1
+            type(self)._tx_last_error = str(e)
+            type(self)._tx_state = "error"
+            type(self)._write_status()
+            return False

@@ -1,0 +1,48 @@
+[Unit]
+Description=AERIS Ground Station Backend (FastAPI + WebSocket)
+Documentation=file:///home/piaeris/aeris-project/README.md
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+After=network-online.target
+Wants=network-online.target
+# The hotspot guard heals the Wi-Fi AP. It is ordered before the backend so
+# the AP is already coming up when the dashboard starts to serve. "Wants" (not
+# "Requires") so a failing guard can never keep the backend down.
+Wants=aeris-hotspot-guard.service
+After=aeris-hotspot-guard.service
+# Never give up restarting the backend: it must come back on every reboot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The backend talks to the real hardware buses (I2C/SPI) and owns the SQLite
+# detection database, so it runs as root. It is sandboxed with NoNewPrivileges.
+User=root
+WorkingDirectory=/home/piaeris/aeris-project/ground-station/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Default port. /etc/aeris/aeris.env is read AFTER this line, so the env file
+# always wins - the port only has to be changed in ONE place for the whole
+# system (edit AERIS_PORT in /etc/aeris/aeris.env, then restart the service).
+Environment=AERIS_PORT=80
+EnvironmentFile=-/etc/aeris/aeris.env
+# Fail fast with a clear message in the journal instead of a confusing traceback.
+ExecStartPre=/usr/bin/test -x /home/piaeris/aeris-project/ground-station/backend/venv/bin/python
+ExecStartPre=/usr/bin/test -f /home/piaeris/aeris-project/ground-station/backend/main.py
+# A missing frontend build does not stop the API, but it must be visible in
+# the journal - the "-" prefix makes this check non-fatal.
+ExecStartPre=-/usr/bin/test -f /home/piaeris/aeris-project/ground-station/frontend/dist/index.html
+ExecStart=/home/piaeris/aeris-project/ground-station/backend/venv/bin/python main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=yes
+# The backend is the one service that must stay responsive while the desktop
+# is busy, so it gets a higher CPU share than the other units.
+CPUWeight=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeris-backend
+
+[Install]
+WantedBy=multi-user.target

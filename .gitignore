@@ -1,2 +1,24 @@
 .docx
 *.docx
+
+# AERIS local auth secret (generated on first start; never commit)
+.aeris_auth_token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# AERIS runtime artefacts
+ground-station/backend/weather_cache.json
+
+# Runtime detection database (SQLite + WAL sidecars) - binary, rewritten on every
+# write. Preserved in the deployment backup, not in git.
+ground-station/backend/aeris_detections.db
+ground-station/backend/aeris_detections.db-wal
+ground-station/backend/aeris_detections.db-shm

@@ -1,0 +1,41 @@
+Choose option A first: Continue and COMPLETE the remaining performance fixes.
+
+Do not ask me again whether to continue. Proceed with the following tasks:
+
+Fully inspect LiveFeed, MissionMap, DetectionsTable, and useTelemetrySimulation.
+Inspect canvas rendering, map updates, table rendering, React re-renders, and memory management.
+Inspect the backend telemetry broadcaster and WebSocket implementation.
+Identify actual performance bottlenecks and implement safe, targeted fixes.
+Preserve all existing UI, features, real-time telemetry, and functionality.
+Run TypeScript checks, frontend production build, and backend syntax checks.
+
+After completing option A:
+
+Proceed to option C:
+
+Start the actual application on the Raspberry Pi.
+Verify http://localhost:8000/health.
+Verify frontend and backend connectivity.
+Test WebSocket connections.
+Inspect browser console errors if browser access is available.
+Check CPU and RAM usage during dashboard operation.
+
+If actual hardware or browser profiling is unavailable, tell me exactly what I need to run manually.
+
+Finally, proceed to option B:
+
+Generate the complete final report with:
+
+Confirmed root causes of lag.
+Files modified.
+Fixes implemented.
+Build verification results.
+Runtime verification results.
+CPU/RAM measurements if available.
+Remaining issues and recommendations.
+
+IMPORTANT: Do not claim that the application is fully optimized without actual evidence.
+
+Do not stop after analysis. Implement the fixes directly in the existing project.
+
+My goal is a stable, smooth, lightweight Aeris Ground Station running on Raspberry Pi without sacrificing real-time functionality.

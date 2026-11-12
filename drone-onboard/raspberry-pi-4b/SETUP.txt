@@ -1,7 +1,7 @@
-====================================
+================================
   HUMAN DETECTION PROTOTYPE - SETUP
   Raspberry Pi 4 Model B
-====================================
+================================
 
 1. CREATE VIRTUAL ENVIRONMENT
    python -m venv venv
@@ -13,9 +13,67 @@
 3. RUN THE PROGRAM
    python main.py
 
-====================================
+===================================
+  HARDWARE CONNECTIONS - RASPBERRY PI (AERIS THESIS SCHEMA)
+===================================
+
+Based on: "project thesis thermal camera.docx"
+
+- Both the MLX90640 (I2C) and Ra-02 LoRa (SX1278, SPI) operate on **3.3V logic**.
+- The RPi hardware SPI (SPI0) and I2C (I2C1) are mapped to the 40-pin header.
+
+| Component         | Interface | Wiring / GPIO                                    | Voltage |
+|-------------------|-----------|--------------------------------------------------|---------|
+| **MLX90640**      | I2C       | SDA -> GPIO2 (Pin 3), SCL -> GPIO3 (Pin 5)      | 3.3V    |
+|                   |           | VCC -> 3.3V, GND -> GND                          |         |
+| **Ra-02 LoRa**    | SPI       | MOSI -> GPIO10 (Pin 19), MISO -> GPIO9 (Pin 21)  | 3.3V    |
+|                   |           | SCK  -> GPIO11 (Pin 23)                          |         |
+|                   |           | NSS/CS -> GPIO24 (Pin 18), RESET -> GPIO23 (Pin 16) |      |
+|                   |           | DIO0/INT -> GPIO18 (Pin 12), ANT -> antenna      |         |
+|                   |           | VCC -> 3.3V (Pin 17), GND -> GND (Pin 9/20)      |         |
+
+**⚠️ CORRECTED 2026-11-09:** An earlier version of this table listed CE0->GPIO8
+(Pin 24) and INT->GPIO4 (Pin 7). That was WRONG. The thesis schema (docx) uses
+NSS->GPIO24 (Pin 18), RESET->GPIO23 (Pin 16), DIO0->GPIO18 (Pin 12).
+Root cause of the 0x00 reads: missing RESET pulse + wrong NSS handling —
+a hardware-software integration mismatch, NOT defective modules.
+Wiring per the corrected table above is verified working (0x12, TX OK).
+
+**⚠️ WARNING (from thesis):** Never power on the Ra-02 LoRa module without its
+antenna securely connected. Operating without an antenna damages the RF power amplifier.
+
+Enable SPI & fast I2C bus speed (RPi4: /boot/config.txt | RPi5: /boot/firmware/config.txt):
+
+```bash
+sudo nano /boot/config.txt
+# Add / modify:
+dtparam=i2c_arm=on,i2c_arm_baudrate=800000
+dtparam=spi=on
+sudo reboot
+```
+
+Environment setup & dependencies (from thesis):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-pip python3-opencv i2c-tools
+
+python3 -m venv --system-site-packages env
+source env/bin/activate
+
+pip install adafruit-circuitpython-mlx90640 pySX127x numpy
+```
+
+Verify hardware recognition (from thesis):
+
+```bash
+# MLX90640 I2C test: sudo i2cdetect -y 1   (Should show address 0x33)
+# LoRa SPI test:     ls /dev/spidev0.*     (Should list spidev0.0)
+```
+
+===================================
   DEVICE INFO
-====================================
+===================================
 
   Device : Raspberry Pi 4 Model B
   CPU    : Broadcom BCM2711
@@ -24,12 +82,14 @@
   LoRa   : Simulation Mode
   Camera : USB Camera (Connected)
 
-====================================
+===================================
   NOTES
-====================================
+===================================
 
 - Uses USB camera (index 0)
 - Press Q in the detection window to quit
 - Dashboard runs at http://localhost:5000
+- LoRa currently runs in Simulation Mode (UDP socket) —
+  swap transport layer for real SX1278 radio when hardware is wired
 
-====================================
+===================================

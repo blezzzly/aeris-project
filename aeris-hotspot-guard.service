@@ -1,0 +1,32 @@
+[Unit]
+Description=AERIS Hotspot Guard — keeps aeris-hotspot active
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+# "Wants" instead of "Requires": this guard exists to heal the hotspot, so it
+# must survive NetworkManager being stopped or restarted. With "Requires" a
+# "systemctl stop NetworkManager" would take the guard down with it and it
+# would never come back on its own.
+Wants=NetworkManager.service
+# Never give up restarting the guard, not even after a burst of failures.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Environment=AERIS_HOTSPOT_CON=aeris-hotspot
+Environment=AERIS_HOTSPOT_DISABLE_MARKER=/var/lib/aeris/hotspot-disabled
+Environment=AERIS_HOTSPOT_POLL_INTERVAL=5
+ExecStart=/home/piaeris/aeris-project/ground-station/hotspot_guard.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=yes
+# The guard only polls once every few seconds - keep it out of the way of the
+# backend and the desktop.
+CPUWeight=50
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeris-hotspot-guard
+
+[Install]
+WantedBy=multi-user.target

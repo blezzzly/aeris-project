@@ -8,49 +8,40 @@ import { DetectionsPage } from './pages/DetectionsPage';
 import { MapPage } from './pages/MapPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { useAppStore } from './stores/appStore';
-import { useWebSocket } from './hooks/useWebSocket';
+import { useWebSocket, notifyAuthChanged } from './hooks/useWebSocket';
 
 function App() {
-  const { activeTab, modalOpen } = useAppStore();
-  const [wsConnected, setWsConnected] = useState(false);
+  const { activeTab, modalOpen, linkState } = useAppStore();
+  const [loginToken, setLoginToken] = useState('');
+  const [showLogin, setShowLogin] = useState<boolean>(() => !localStorage.getItem('aeris_token'));
 
-  const ws = useWebSocket('ws://localhost:8000/ws');
+  const handleLogin = () => {
+    const t = loginToken.trim();
+    if (!t) return;
+    localStorage.setItem('aeris_token', t);
+    setShowLogin(false);
+    // The live channel (WebSocket) needs the credential that was just
+    // stored. Without this notification the socket would stay closed and
+    // every hardware indicator would keep showing OFFLINE / DISCONNECTED.
+    notifyAuthChanged();
+  };
 
   useEffect(() => {
-    if (ws && ws.ws) {
-      const checkConnection = setInterval(() => {
-        setWsConnected(ws.ws.current?.readyState === WebSocket.OPEN);
-      }, 1000);
-      return () => clearInterval(checkConnection);
-    }
-  }, [ws]);
+    const onAuthFailed = () => setShowLogin(true);
+    window.addEventListener('aeris-auth-failed', onAuthFailed);
+    return () => window.removeEventListener('aeris-auth-failed', onAuthFailed);
+  }, []);
+
+  // The connection state comes from the socket itself (useWebSocket tracks the
+  // real open/close events), so it can never drift out of sync.
+  const { connected: wsConnected } = useWebSocket();
 
   useEffect(() => {
     if (wsConnected) return;
-
-    const conditions = ['Partly Cloudy', 'Sunny', 'Overcast', 'Light Rain', 'Clear'];
-
-    const telemetryInterval = setInterval(() => {
-      const state = useAppStore.getState();
-      const time = Date.now() / 5000;
-      const survivor = state.survivor;
-      
-      state.updateUAV({
-        altitude: Math.max(0, state.uav.altitude + (Math.random() - 0.5) * 0.5),
-        speed: Math.max(0, state.uav.speed + (Math.random() - 0.5) * 0.2),
-        battery: Math.max(0, state.uav.battery - (Math.random() > 0.95 ? 0.1 : 0)),
-        heading: (state.uav.heading + 2) % 360,
-        lat: survivor.lat + Math.sin(time) * 0.001,
-        lng: survivor.lng + Math.cos(time) * 0.001,
-      });
-
-      state.updateEnvironment({
-        temperature: Math.round((25 + Math.random() * 8) * 10) / 10,
-        condition: conditions[Math.floor(Math.random() * conditions.length)],
-      });
-    }, 2000);
-
-    return () => clearInterval(telemetryInterval);
+    // The live link is down. Telemetry is NEVER simulated locally: the backend is
+    // the single source of truth for flight data (see ground-station/backend/main.py,
+    // which refuses to fabricate readings). The last known values simply stay on
+    // screen and are replaced as soon as the real producer reports again.
   }, [wsConnected]);
 
   useEffect(() => {
@@ -68,11 +59,45 @@ function App() {
     }
   }, [modalOpen]);
 
+  if (showLogin) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center bg-slate-100">
+        <div className="panel-card max-w-md w-full p-6">
+          <h2 className="text-lg font-bold text-slate-800 mb-2">AERIS Ground Station</h2>
+          <p className="text-sm text-slate-500 mb-4">Enter your access token to open the dashboard.</p>
+          <input
+            type="password"
+            value={loginToken}
+            onChange={(e) => setLoginToken(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleLogin();
+            }}
+            placeholder="Access token"
+            className="w-full text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-aeris"
+          />
+          <button
+            onClick={handleLogin}
+            className="w-full py-2 bg-aeris hover:bg-aeris-dark text-white font-semibold rounded-lg transition-colors"
+          >
+            Connect
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-screen flex text-sm font-sans">
       <Sidebar />
       <main className="flex-1 flex flex-col relative overflow-hidden bg-slate-100">
         <Header />
+        {!wsConnected && (
+          <div className="bg-amber-500 text-white text-xs font-semibold px-4 py-1.5 flex items-center gap-2">
+            {linkState === 'connecting'
+              ? 'CONNECTING TO THE GROUND STATION — opening the live hardware channel…'
+              : 'LIVE LINK OFFLINE — telemetry is not being updated (values shown are the last known readings)'}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto lg:overflow-hidden p-4 lg:p-6 scroll-smooth">
           {activeTab === 'dashboard' && <Dashboard />}
           {activeTab === 'livefeed' && <LiveFeedPage />}

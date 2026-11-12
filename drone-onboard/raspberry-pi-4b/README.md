@@ -151,6 +151,11 @@ python main.py
 
 ## Using Screen (Background Process)
 
+> For an unattended device use the **systemd service** in
+> [Production Deployment](#production-deployment) instead — it restarts the
+> pipeline after a crash and starts it automatically on every boot. `screen`
+> is only useful while you are debugging in the foreground.
+
 ### Start Detection in Background
 
 ```bash
@@ -417,35 +422,67 @@ htop
 
 ### Auto-start on Boot
 
-```bash
-# Create service
-sudo nano /etc/systemd/system/aeris.service
+The pipeline ships with a systemd unit, `aeris-onboard.service`, and an
+installer that creates the virtualenv, verifies every dependency, installs the
+unit and enables it for boot:
 
-# Add:
+```bash
+cd ~/aeris-project/drone-onboard/raspberry-pi-4b
+sudo ./install_onboard_service.sh
+```
+
+What the installer does:
+
+1. **Hardware conflict check** — refuses to run on a Pi that already runs the
+   ground station. The ground station backend and the onboard pipeline drive
+   the *same* sensors (MLX90640 on I2C1 @ `0x33`, SX1278 on SPI0 with GPIO23
+   RESET and GPIO24 NSS). The ground station *receives* LoRa, the onboard
+   pipeline *transmits* it — one radio cannot do both at once. Use `--force`
+   only if the hardware really is separate.
+2. **Virtualenv** — creates it if missing and verifies that every module the
+   pipeline imports is importable (`numpy`, `flask`, `cv2`, `board`, `busio`,
+   `adafruit_mlx90640`, `spidev`, `RPi.GPIO`, `SX127x`). Missing packages are
+   installed individually, so a working environment is never downgraded.
+3. **Import check** — `main.py` must import cleanly, otherwise the service
+   would crash-loop on every boot.
+4. **systemd unit** — installs `aeris-onboard.service` and enables it.
+
+Verify:
+
+```bash
+sudo systemctl status aeris-onboard
+sudo journalctl -u aeris-onboard -f
+```
+
+The local Flask panel is served on port `5000`.
+
+The unit itself (`aeris-onboard.service`) uses:
+
+```ini
 [Unit]
-Description=AERIS Detection Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
+Conflicts=aeris-backend.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/AERIS/raspberry-pi-4b
-ExecStart=/home/pi/AERIS/raspberry-pi-4b/venv/bin/python main.py
-Restart=on-failure
+User=root
+WorkingDirectory=/home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b
+ExecStart=/home/piaeris/aeris-project/drone-onboard/raspberry-pi-4b/venv/bin/python -u main.py
+Restart=always
 RestartSec=10
+KillSignal=SIGINT
 
 [Install]
 WantedBy=multi-user.target
-
-# Enable service
-sudo systemctl enable aeris.service
-
-# Start service
-sudo systemctl start aeris.service
-
-# Check status
-sudo systemctl status aeris.service
 ```
+
+`StartLimitIntervalSec=0` means systemd never gives up restarting the
+pipeline; `Restart=always` means it comes back after a crash or a power cut.
+
+> The full start-up architecture of the whole system — including the ground
+> station — is documented in [BOOT_AUTOSTART.md](../../BOOT_AUTOSTART.md).
 
 ---
 

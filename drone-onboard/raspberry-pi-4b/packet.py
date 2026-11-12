@@ -42,8 +42,8 @@ class DetectionPacket:
         confidence: float = 0.0,
         bbox: tuple | None = None,
         vital_signs: dict | None = None,
-        rssi: float = -65.0,
-        snr: float = 8.0,
+        rssi=None,
+        snr=None,
         frequency_mhz: float = 915.0,
     ) -> dict:
         """
@@ -82,8 +82,8 @@ class DetectionPacket:
                 "confidence": round(confidence, 2),
             },
             "transmission": {
-                "rssi": round(rssi, 1),
-                "snr": round(snr, 1),
+                "rssi": round(rssi, 1) if rssi is not None else None,
+                "snr": round(snr, 1) if snr is not None else None,
                 "frequency_mhz": frequency_mhz,
             },
         }

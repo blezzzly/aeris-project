@@ -1,8 +1,38 @@
-opencv-python==4.10.0.84
-numpy==1.26.4
-ultralytics==8.3.28
-torch==2.4.1
-torchvision==0.19.1
-requests==2.32.3
-pandas==2.2.3
-flask==3.1.1
+# AERIS Onboard Pipeline — Raspberry Pi 4B (drone companion computer)
+#
+# These are the packages the CURRENT pipeline (main.py v8 — thermal + real
+# LoRa) imports at runtime. The service starts with no human present, so
+# every one of them has to be present in the virtualenv before the first
+# boot.
+#
+#   python3 -m venv venv
+#   ./venv/bin/pip install -r requirements.txt
+#
+# System packages needed as well:
+#   sudo apt-get install -y python3-venv python3-dev i2c-tools libgpiod2
+
+# ── Core pipeline ────────────────────────────────────────────────────────
+numpy>=1.26
+flask>=3.1
+# The headless build is the right one here: the pipeline has to run without
+# an X server, and the non-headless build drags in OpenGL libraries that a
+# Pi running headless services does not need.
+opencv-python-headless>=4.10
+
+# ── Hardware: MLX90640 thermal camera (I2C1 @ 0x33) ─────────────────────
+adafruit-blinka>=10.1
+adafruit-circuitpython-mlx90640>=1.3
+
+# ── Hardware: SX1278 / Ra-02 LoRa radio (SPI0 + GPIO23 RESET, GPIO24 NSS) ─
+spidev>=3.8
+RPi.GPIO>=0.7
+SX127x>=0.4
+
+# ── Legacy YOLO detection path (detector.py / human_detection.py) ────────
+# main.py v8 does NOT import these modules — the pipeline is thermal based
+# now. Install them only if you re-enable the YOLO human detector:
+#   ultralytics==8.3.28
+#   torch==2.4.1
+#   torchvision==0.19.1
+#   requests==2.32.3
+#   pandas==2.2.3

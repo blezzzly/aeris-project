@@ -1,5 +1,7 @@
 import { useAppStore } from '../stores/appStore';
 import { Icon, IconFill } from './Icon';
+import { useHardwareStatus } from '../hooks/useHardwareStatus';
+import type { DeviceHealthState } from '../types';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: 'squares-four' as const },
@@ -8,8 +10,102 @@ const navItems = [
   { id: 'map', label: 'Map', icon: 'map-trifold' as const },
 ];
 
+type RowState = 'online' | 'offline' | 'warning' | 'unknown';
+
+/**
+ * One hardware line in the Hardware Status card.
+ *
+ * The dot colour and the text are driven by the measured state - there is no
+ * hardcoded or assumed status anywhere.
+ */
+function StatusRow({
+  label,
+  state,
+  onlineText,
+  offlineText,
+}: {
+  label: string;
+  state: RowState;
+  onlineText: string;
+  offlineText: string;
+}) {
+  const dot =
+    state === 'online'
+      ? 'bg-green-500'
+      : state === 'warning'
+        ? 'bg-amber-500'
+        : state === 'unknown'
+          ? 'bg-slate-300'
+          : 'bg-red-400';
+
+  const text =
+    state === 'online'
+      ? 'text-green-700'
+      : state === 'warning'
+        ? 'text-amber-600'
+        : state === 'unknown'
+          ? 'text-slate-400'
+          : 'text-red-500';
+
+  const value =
+    state === 'online'
+      ? onlineText
+      : state === 'warning'
+        ? offlineText
+        : state === 'unknown'
+          ? 'Unknown'
+          : offlineText;
+
+  return (
+    <div className="flex justify-between items-center gap-1 py-1 border-b border-slate-100 last:border-0">
+      <span className="text-slate-500 text-[10px] flex items-center gap-1.5 min-w-0">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+        <span className="truncate">{label}</span>
+      </span>
+      <span className={`font-medium text-[9px] uppercase whitespace-nowrap ${text}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** Map a measured device state onto the row state used by the card. */
+function rowStateFor(state: DeviceHealthState): RowState {
+  switch (state) {
+    case 'online':
+      return 'online';
+    case 'stale':
+      return 'warning';
+    case 'offline':
+      return 'offline';
+    default:
+      return 'unknown';
+  }
+}
+
 export function Sidebar() {
-  const { activeTab, setActiveTab, uav, alertAcknowledged, sidebarOpen, setSidebarOpen, environment } = useAppStore();
+  const { activeTab, setActiveTab, alertAcknowledged, sidebarOpen, setSidebarOpen, environment, system } =
+    useAppStore();
+
+  // ── Real hardware states ────────────────────────────────────────────────
+  // Every state comes from the backend's real measurements (see
+  // useHardwareStatus): the Pi is "online" while the station keeps
+  // delivering a fresh report, and each device is only "connected" when it
+  // actually answered recently.
+  const hw = useHardwareStatus();
+
+  // System health is derived from the real measurements of the Pi. When the
+  // live link is down the last measurements are no longer current, so the
+  // state is reported as unknown instead of a stale "Normal".
+  const CPU_WARN_C = 80;
+  const RAM_WARN_PCT = 90;
+  const systemHealth: RowState =
+    !hw.linkFresh || system == null
+      ? 'unknown'
+      : (system.cpu_temp_c != null && system.cpu_temp_c >= CPU_WARN_C) ||
+          (system.ram_usage_pct != null && system.ram_usage_pct >= RAM_WARN_PCT)
+        ? 'warning'
+        : 'online';
 
   const getEnvironmentIcon = (condition: string) => {
     if (condition.includes('Rain')) return 'cloud';
@@ -76,40 +172,38 @@ export function Sidebar() {
         </nav>
 
         <div className="p-4 border-t border-slate-100 shrink-0">
-          <h3 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">UAV Status</h3>
-          <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold bg-green-100 text-green-700 px-2 py-0.5 rounded uppercase">
-                Online
-              </span>
-              <IconFill name="drone" className="text-slate-400" />
-            </div>
-            <div className="font-medium text-slate-800 mb-3 text-sm">AERIS UAV-01</div>
-
-            <div className="space-y-2 text-xs">
-              <div>
-                <div className="flex justify-between text-slate-500 mb-1">
-                  <span>Battery</span>
-                  <span className="font-medium text-slate-700">{Math.round(uav.battery)}%</span>
-                </div>
-                <div className="w-full bg-slate-200 rounded-full h-1.5">
-                  <div
-                    className="bg-aeris h-1.5 rounded-full transition-all duration-300"
-                    style={{ width: `${uav.battery}%` }}
-                  />
-                </div>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-slate-100">
-                <span className="text-slate-500">Altitude</span>
-                <span className="font-medium text-slate-700">{Math.round(uav.altitude)} m</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-slate-100">
-                <span className="text-slate-500">Signal</span>
-                <div className="flex items-center gap-1 text-aeris">
-                  <IconFill name="cell-signal-full" />
-                  <span className="font-medium text-xs">Strong</span>
-                </div>
-              </div>
+          <h3 className="text-xs font-bold text-slate-400 mb-2.5 uppercase tracking-wider">Hardware Status</h3>
+          <div className="bg-slate-50 rounded-xl px-3 py-2 border border-slate-100">
+            {/* Essential component statuses only - every state is measured. */}
+            <div className="space-y-0.5 text-xs">
+              <StatusRow
+                label="Raspberry Pi 4B"
+                state={rowStateFor(hw.rpi)}
+                onlineText="Online"
+                offlineText="Offline"
+              />
+              <StatusRow
+                label="MLX90640"
+                state={rowStateFor(hw.thermal)}
+                onlineText="Connected"
+                offlineText={hw.thermal === 'stale' ? 'Stale' : 'Disconnected'}
+              />
+              <StatusRow
+                label="SX1278 LoRa"
+                state={rowStateFor(hw.lora)}
+                onlineText="Connected"
+                offlineText={hw.lora === 'stale' ? 'Stale' : 'Disconnected'}
+              />
+              {/* Only shown when it is not normal - the header strip already
+                  carries the CPU/RAM figures. */}
+              {systemHealth !== 'online' && (
+                <StatusRow
+                  label="System Health"
+                  state={systemHealth}
+                  onlineText="Normal"
+                  offlineText="Warning"
+                />
+              )}
             </div>
           </div>
 

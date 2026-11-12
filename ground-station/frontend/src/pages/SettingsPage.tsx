@@ -1,10 +1,17 @@
 import { useState, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Icon } from '../components/Icon';
+import { getWebSocketUrl } from '../lib/api';
 
 export function SettingsPage() {
   type SectionId = 'comm' | 'mission' | 'alerts' | 'system';
-  const { settings, updateSettings, resetSettings, uav, link } = useAppStore();
+  const { settings, updateSettings, resetSettings, uav, link, hardware } = useAppStore();
+
+  // Real LoRa reception measurements - null until a packet was received.
+  const loraRssi = hardware?.lora_sx1278?.rssi_dbm ?? null;
+  const loraSnr = hardware?.lora_sx1278?.snr_db ?? null;
+  // The frequency the connected radio reports from its own registers.
+  const loraFrequency = hardware?.lora_sx1278?.frequency_mhz ?? null;
   const [activeSection, setActiveSection] = useState<SectionId>('comm');
   const [hasChanges, setHasChanges] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -87,15 +94,21 @@ export function SettingsPage() {
       </div>
 
       <div className="border-t border-slate-100 pt-6">
-        <h3 className="text-sm font-bold text-slate-800 mb-3">915MHz LoRa Telemetry Link</h3>
+        <h3 className="text-sm font-bold text-slate-800 mb-3">433 MHz LoRa Telemetry Link (SX1278)</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="text-[10px] uppercase text-slate-500 block mb-1">Frequency (MHz)</label>
+            <label className="text-[10px] uppercase text-slate-500 block mb-1">
+              Frequency (MHz)
+              {loraFrequency != null && (
+                <span className="ml-2 text-aeris normal-case">radio reports {loraFrequency} MHz</span>
+              )}
+            </label>
             <select
               value={settings.comm.loraFrequency}
               onChange={(e) => { updateSettings('comm', { loraFrequency: Number(e.target.value) }); handleChange(); }}
               className="w-full text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-aeris"
             >
+              <option value={433}>433 MHz (SX1278, EU/ASIA)</option>
               <option value={868}>868 MHz (EU)</option>
               <option value={915}>915 MHz (US/Asia)</option>
               <option value={923}>923 MHz (Asia)</option>
@@ -121,19 +134,27 @@ export function SettingsPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <div className="bg-slate-50 rounded-lg p-3">
             <div className="text-slate-500 text-[9px] uppercase">WiFi Latency</div>
-            <div className="font-mono font-bold text-slate-800">{Math.round(link.wifi.latency)}ms</div>
+            <div className="font-mono font-bold text-slate-800">
+              {link.wifi.latency != null ? Math.round(link.wifi.latency) + 'ms' : 'N/A'}
+            </div>
           </div>
           <div className="bg-slate-50 rounded-lg p-3">
             <div className="text-slate-500 text-[9px] uppercase">WiFi RSSI</div>
-            <div className="font-mono font-bold text-slate-800">{Math.round(link.wifi.rssi)}dBm</div>
+            <div className="font-mono font-bold text-slate-800">
+              {link.wifi.rssi != null ? Math.round(link.wifi.rssi) + 'dBm' : 'N/A'}
+            </div>
           </div>
           <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-500 text-[9px] uppercase">LoRa Latency</div>
-            <div className="font-mono font-bold text-slate-800">{Math.round(link.lora.latency)}ms</div>
+            <div className="text-slate-500 text-[9px] uppercase">LoRa RSSI</div>
+            <div className="font-mono font-bold text-slate-800">
+              {loraRssi != null ? Math.round(loraRssi) + 'dBm' : 'N/A'}
+            </div>
           </div>
           <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-500 text-[9px] uppercase">LoRa PLR</div>
-            <div className="font-mono font-bold text-slate-800">{(link.lora.plr ?? 0).toFixed(1)}%</div>
+            <div className="text-slate-500 text-[9px] uppercase">LoRa SNR</div>
+            <div className="font-mono font-bold text-slate-800">
+              {loraSnr != null ? loraSnr.toFixed(1) + 'dB' : 'N/A'}
+            </div>
           </div>
         </div>
       </div>
@@ -281,17 +302,17 @@ export function SettingsPage() {
       <div className="border-t border-slate-100 pt-6">
         <h3 className="text-sm font-bold text-slate-800 mb-3">Current Status</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-          <div className={`rounded-lg p-3 ${uav.battery < settings.alerts.lowBatteryThreshold ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
+          <div className={`rounded-lg p-3 ${uav.battery != null && uav.battery < settings.alerts.lowBatteryThreshold ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
             <div className="text-slate-500 text-[9px] uppercase">Battery</div>
-            <div className="font-mono font-bold text-slate-800">{Math.round(uav.battery)}%</div>
+            <div className="font-mono font-bold text-slate-800">{Math.round(uav.battery ?? 0)}%</div>
           </div>
-          <div className={`rounded-lg p-3 ${link.wifi.rssi < settings.alerts.lowSignalThreshold ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
+          <div className={`rounded-lg p-3 ${link.wifi.rssi != null && link.wifi.rssi < settings.alerts.lowSignalThreshold ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
             <div className="text-slate-500 text-[9px] uppercase">Signal</div>
-            <div className="font-mono font-bold text-slate-800">{Math.round(link.wifi.rssi)}dBm</div>
+            <div className="font-mono font-bold text-slate-800">{Math.round(link.wifi.rssi ?? 0)}dBm</div>
           </div>
-          <div className={`rounded-lg p-3 ${uav.altitude > settings.alerts.maxAltitude ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
+          <div className={`rounded-lg p-3 ${uav.altitude != null && uav.altitude > settings.alerts.maxAltitude ? 'bg-red-50 border border-red-200' : 'bg-slate-50'}`}>
             <div className="text-slate-500 text-[9px] uppercase">Altitude</div>
-            <div className="font-mono font-bold text-slate-800">{uav.altitude.toFixed(1)}m</div>
+            <div className="font-mono font-bold text-slate-800">{uav.altitude != null ? `${uav.altitude.toFixed(1)}m` : 'N/A'}</div>
           </div>
           <div className="bg-slate-50 rounded-lg p-3">
             <div className="text-slate-500 text-[9px] uppercase">GPS</div>
@@ -317,7 +338,7 @@ export function SettingsPage() {
           </div>
           <div className="flex justify-between">
             <span className="text-slate-500">Backend URL:</span>
-            <span className="font-mono text-slate-800">ws://localhost:8000/ws</span>
+            <span className="font-mono text-slate-800">{getWebSocketUrl()}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-slate-500">Device:</span>

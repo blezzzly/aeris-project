@@ -1,11 +1,17 @@
 import { useAppStore } from '../stores/appStore';
 import { Icon, IconFill } from './Icon';
+import { isValidDetectionFix } from '../types';
 
 export function DetectionsTable() {
   const { detections, alertAcknowledged, setModalOpen, setActiveTab } = useAppStore();
 
+  const fix = (lat: number | null, lng: number | null) =>
+    isValidDetectionFix(lat, lng)
+      ? `${(lat as number).toFixed(4)}° N, ${(lng as number).toFixed(4)}° E`
+      : 'GPS unavailable (no fix)';
+
   return (
-    <div className="lg:col-span-9 panel-card overflow-hidden flex flex-col">
+    <div className="lg:col-span-7 panel-card overflow-hidden flex flex-col">
       <div className="flex justify-between items-center mb-4 shrink-0">
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">Detections Today</h3>
@@ -50,7 +56,7 @@ export function DetectionsTable() {
                   <div className="flex gap-2">
                     <div className="w-10 h-10 bg-slate-200 rounded overflow-hidden relative">
                       <img
-                        src="https://images.unsplash.com/photo-1542361345-89e58247f2d5?q=80&w=100&auto=format&fit=crop"
+                        src="/image/placeholder.svg"
                         className="w-full h-full object-cover"
                         alt="RGB thumbnail"
                       />
@@ -60,7 +66,7 @@ export function DetectionsTable() {
                     </div>
                     <div className="w-10 h-10 bg-indigo-900 rounded overflow-hidden relative hidden sm:block">
                       <img
-                        src="https://images.unsplash.com/photo-1542361345-89e58247f2d5?q=80&w=100&auto=format&fit=crop"
+                        src="/image/placeholder.svg"
                         className="w-full h-full object-cover filter contrast-150 hue-rotate-180 saturate-200"
                         alt="Thermal thumbnail"
                       />
@@ -72,9 +78,11 @@ export function DetectionsTable() {
                   <IconFill name="person" className="inline mr-1" /> Survivor
                 </td>
                 <td className="py-3 px-4 font-mono text-slate-500 hidden md:table-cell">
-                  {detection.lat.toFixed(4)}° N, {detection.lng.toFixed(4)}° E
+                  {fix(detection.lat, detection.lng)}
                 </td>
-                <td className="py-3 px-4 hidden sm:table-cell">{detection.distance} m</td>
+                <td className="py-3 px-4 hidden sm:table-cell">
+                  {detection.distance != null ? `${detection.distance} m` : 'N/A'}
+                </td>
                 <td className="py-3 px-4 hidden md:table-cell">
                   <div className="flex items-center gap-2">
                     <span>{detection.confidence}%</span>

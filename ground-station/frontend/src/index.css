@@ -1,6 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-@import url('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -125,6 +122,113 @@ body {
 .custom-leaflet-marker {
   background: transparent;
   border: none;
+}
+
+/* ── AERIS UAV radar indicator ─────────────────────────────────────────── */
+.aeris-uav-marker {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.aeris-radar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 150px;
+  height: 150px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px dashed rgba(148, 163, 184, 0.45);
+  pointer-events: none;
+}
+
+.aeris-radar-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(56, 189, 248, 0.3) 0deg,
+    rgba(56, 189, 248, 0.06) 32deg,
+    rgba(56, 189, 248, 0) 62deg
+  );
+  animation: aeris-radar-sweep 3.4s linear infinite;
+}
+
+.aeris-radar-cone {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  transform-origin: 50% 50%;
+}
+
+@keyframes aeris-radar-sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.aeris-uav-arrow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.65));
+}
+
+/* ── AERIS survivor detection marker ───────────────────────────────────── */
+.aeris-detection-marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+}
+
+.aeris-detection-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: #e11d48;
+  border: 2px solid #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  opacity: 0.65;
+}
+
+.aeris-detection-in-field .aeris-detection-dot {
+  opacity: 1;
+}
+
+.aeris-detection-ping {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: rgba(225, 29, 72, 0.45);
+  animation: aeris-detection-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes aeris-detection-ping {
+  75%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
 }
 
 @keyframes ping {

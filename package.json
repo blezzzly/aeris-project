@@ -1,0 +1,10 @@
+{
+  "name": "aeris-project",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "cd ground-station/frontend && npm run dev",
+    "setup": "cd ground-station/frontend && npm run install:all"
+  }
+}

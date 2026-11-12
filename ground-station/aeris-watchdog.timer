@@ -1,0 +1,17 @@
+[Unit]
+Description=AERIS Watchdog timer - runs the self-healing check every 5 minutes
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+
+[Timer]
+# First run a few minutes after boot (the boot check already covered the
+# initial start), then every 5 minutes.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=aeris-watchdog.service
+# Spread the load a little so the check does not always land on the same
+# second as the telemetry interval.
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

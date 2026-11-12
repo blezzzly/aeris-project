@@ -1,12 +1,17 @@
 import { useAppStore } from '../stores/appStore';
 import { Icon, IconFill } from './Icon';
+import { isValidDetectionFix } from '../types';
 
 export function SurvivorModal() {
-  const { modalOpen, setModalOpen, acknowledgeAlert, alertAcknowledged, detections } = useAppStore();
+  const { modalOpen, setModalOpen, acknowledgeAlert, alertAcknowledged, detections, thermal } = useAppStore();
 
   if (!modalOpen) return null;
 
   const currentDetection = detections.find((d) => d.status === 'new') || detections[0];
+  const hasFix = isValidDetectionFix(currentDetection?.lat, currentDetection?.lng);
+
+  const coord = (v: number | null | undefined) =>
+    typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(4)}` : 'N/A';
 
   return (
     <div
@@ -41,7 +46,7 @@ export function SurvivorModal() {
               <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Visual (RGB)</h3>
               <div className="bg-slate-100 rounded-xl aspect-video md:aspect-video overflow-hidden border border-slate-200 relative">
                 <img
-                  src="https://images.unsplash.com/photo-1542361345-89e58247f2d5?q=80&w=400&auto=format&fit=crop"
+                  src="/image/placeholder.svg"
                   className="w-full h-full object-cover"
                   alt="RGB High Res"
                 />
@@ -57,27 +62,41 @@ export function SurvivorModal() {
               <div className="space-y-4 flex-1">
                 <div>
                   <div className="text-[10px] text-slate-400 uppercase">GPS Coordinates</div>
-                  <div className="font-mono text-sm font-semibold text-slate-800">
-                    {currentDetection?.lat.toFixed(4)}° N, {currentDetection?.lng.toFixed(4)}° E
-                  </div>
-                  <div className="text-[10px] text-slate-500">± 3 m accuracy</div>
+                  {hasFix ? (
+                    <>
+                      <div className="font-mono text-sm font-semibold text-slate-800">
+                        {coord(currentDetection?.lat)}° N, {coord(currentDetection?.lng)}° E
+                      </div>
+                      <div className="text-[10px] text-slate-500">Real GPS fix</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-mono text-sm font-semibold text-slate-500">
+                        GPS unavailable (no fix)
+                      </div>
+                      <div className="text-[10px] text-slate-500">Detection source reports no position — coordinates are not estimated</div>
+                    </>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <div className="text-[10px] text-slate-400 uppercase">Altitude</div>
-                    <div className="text-sm font-semibold text-slate-800">{currentDetection?.altitude} m AMSL</div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      {currentDetection?.altitude != null ? `${currentDetection.altitude} m AMSL` : 'N/A'}
+                    </div>
                   </div>
                   <div>
                     <div className="text-[10px] text-slate-400 uppercase">Dist from UAV</div>
-                    <div className="text-sm font-semibold text-slate-800">{currentDetection?.distance} m</div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      {currentDetection?.distance != null ? `${currentDetection.distance} m` : 'N/A'}
+                    </div>
                   </div>
                 </div>
 
                 <div>
                   <div className="text-[10px] text-slate-400 uppercase">Time Detected</div>
                   <div className="text-sm font-semibold text-slate-800">{currentDetection?.timestamp}</div>
-                  <div className="text-[10px] text-slate-500">Aug 27, 2026</div>
                 </div>
               </div>
 
@@ -95,7 +114,7 @@ export function SurvivorModal() {
               <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
                 <Icon name="user" /> Detected Survivor(s)
               </h3>
-              <span className="text-xs text-slate-500">Total Detected: 1</span>
+              <span className="text-xs text-slate-500">Total Detected: {detections.length}</span>
             </div>
 
             <div className="border border-slate-200 rounded-lg overflow-x-auto">
@@ -114,25 +133,29 @@ export function SurvivorModal() {
                     <td className="py-3 px-3 font-medium text-slate-700">1</td>
                     <td className="py-3 px-3 text-center">
                       <img
-                        src="https://images.unsplash.com/photo-1542361345-89e58247f2d5?q=80&w=40&auto=format&fit=crop"
+                        src="/image/placeholder.svg"
                         className="w-8 h-8 object-cover rounded inline-block"
                         alt="RGB thumbnail"
                       />
                     </td>
                     <td className="py-3 px-3">
-                      <div className="font-semibold text-slate-800">36.2°C - 37.8°C</div>
+                      <div className="font-semibold text-slate-800">
+                        {thermal?.ok && thermal.min_c != null && thermal.max_c != null
+                          ? `${thermal.min_c.toFixed(1)}°C – ${thermal.max_c.toFixed(1)}°C`
+                          : 'N/A — no thermal frame'}
+                      </div>
                       <div className="flex h-1 bg-gradient-to-r from-blue-500 via-yellow-500 to-red-500 rounded mt-1 opacity-70" />
                     </td>
                     <td className="py-3 px-3">
                       <span className="text-green-600 font-bold flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 bg-green-500 rounded-full" /> ALIVE
+                        <span className="w-1.5 h-1.5 bg-green-500 rounded-full" /> DETECTED
                       </span>
-                      <div className="text-[10px] text-slate-500 ml-2">Moving</div>
+                      <div className="text-[10px] text-slate-500 ml-2">thermal source</div>
                     </td>
                     <td className="py-3 px-3">
-                      <div className="font-bold text-aeris text-sm mb-1">92%</div>
+                      <div className="font-bold text-aeris text-sm mb-1">{Math.round(currentDetection?.confidence ?? 0)}%</div>
                       <div className="w-full bg-slate-200 h-1.5 rounded-full">
-                        <div className="bg-aeris h-1.5 rounded-full" style={{ width: '92%' }} />
+                        <div className="bg-aeris h-1.5 rounded-full" style={{ width: `${Math.min(100, Math.max(0, currentDetection?.confidence ?? 0))}%` }} />
                       </div>
                     </td>
                   </tr>
@@ -140,7 +163,7 @@ export function SurvivorModal() {
               </table>
             </div>
             <p className="text-[10px] text-slate-400 mt-2 italic">
-              <Icon name="info" className="inline mr-1" /> Heat range based on calibrated thermal sensor via LoRa telemetry. Environmental conditions may affect readings.
+              <Icon name="info" className="inline mr-1" /> Ambient heat range from the MLX90640 @0x33 (I2C). Detection coordinates are shown only when a real GPS fix exists.
             </p>
           </div>
         </div>

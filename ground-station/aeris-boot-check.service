@@ -1,0 +1,23 @@
+[Unit]
+Description=AERIS Boot Verification — checks the ground station after a reboot
+Documentation=file:///home/piaeris/aeris-project/BOOT_AUTOSTART.md
+# The check has to run against a fully started stack, so it is bound to the
+# aggregate target. "Requires" pulls the target in when the check is started
+# on its own; "After" makes sure the stack is up before the check begins.
+Requires=aeris.target
+After=aeris.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/aeris/aeris.env
+ExecStart=/home/piaeris/aeris-project/ground-station/boot_check.sh
+# Never block the boot: a failing check must not hold up the system.
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeris-boot-check
+
+[Install]
+WantedBy=multi-user.target

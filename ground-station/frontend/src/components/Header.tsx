@@ -1,17 +1,20 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Icon, IconFill } from './Icon';
+import { RpiSystemHealth } from './RpiSystemHealth';
+import { isValidDetectionFix } from '../types';
 
 export function Header() {
-  const { uav, missionTimeSeconds, toggleSidebar, setActiveTab, detections } = useAppStore();
+  const { toggleSidebar, setActiveTab, detections } = useAppStore();
   const [profileOpen, setProfileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
 
-  const h = Math.floor(missionTimeSeconds / 3600).toString().padStart(2, '0');
-  const m = Math.floor((missionTimeSeconds % 3600) / 60).toString().padStart(2, '0');
-  const s = (missionTimeSeconds % 60).toString().padStart(2, '0');
-  const missionTime = `${h}:${m}:${s}`;
+
+  const coord = (lat: number | null | undefined, lng: number | null | undefined) =>
+    isValidDetectionFix(lat, lng)
+      ? `${(lat as number).toFixed(4)}° N, ${(lng as number).toFixed(4)}° E`
+      : 'GPS unavailable (no fix)';
 
   const newDetections = detections.filter(d => d.status === 'new');
   const acknowledgedDetections = detections.filter(d => d.status === 'acknowledged');
@@ -37,46 +40,9 @@ export function Header() {
         </button>
       </div>
 
-      <div className="hidden md:flex flex-1 min-w-0 mx-4 overflow-x-auto hide-scrollbar">
-        <div className="flex items-center gap-6 px-2 lg:px-4 text-xs">
-          <div className="flex items-center gap-2 shrink-0">
-            <IconFill name="battery-full" className="text-xl text-aeris" />
-            <div>
-              <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Battery</div>
-              <div className="font-mono font-semibold text-slate-800">{Math.round(uav.battery)}%</div>
-            </div>
-          </div>
-          <div className="w-px h-6 bg-slate-200 shrink-0" />
-          <div className="shrink-0">
-            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Alt (AMSL)</div>
-            <div className="font-mono font-semibold text-slate-800">{uav.altitude.toFixed(1)} m</div>
-          </div>
-          <div className="w-px h-6 bg-slate-200 shrink-0" />
-          <div className="shrink-0">
-            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Speed</div>
-            <div className="font-mono font-semibold text-slate-800">{uav.speed.toFixed(1)} m/s</div>
-          </div>
-          <div className="w-px h-6 bg-slate-200 shrink-0" />
-          <div className="shrink-0">
-            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Heading</div>
-            <div className="font-mono font-semibold text-slate-800">{Math.round(uav.heading)}°</div>
-          </div>
-          <div className="w-px h-6 bg-slate-200 shrink-0" />
-          <div className="shrink-0">
-            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">GPS Position</div>
-            <div className="font-mono font-semibold text-slate-800">
-              {uav.lat.toFixed(4)}° N, {uav.lng.toFixed(4)}° E
-            </div>
-          </div>
-          <div className="w-px h-6 bg-slate-200 shrink-0" />
-          <div className="shrink-0">
-            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Mission Time</div>
-            <div className="font-mono font-semibold text-slate-800">{missionTime}</div>
-          </div>
-        </div>
-      </div>
+      <RpiSystemHealth />
 
-      <div className="flex items-center gap-3 lg:gap-5">
+      <div className="flex items-center gap-3 lg:gap-5 shrink-0">
         <div className="relative" ref={notifRef}>
           <button
             className="relative text-slate-400 hover:text-slate-600 transition-colors p-2 rounded-lg"
@@ -124,7 +90,7 @@ export function Header() {
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-semibold text-slate-800">Survivor Detected</div>
                           <div className="text-xs text-slate-500 truncate">
-                            {d.lat.toFixed(4)}° N, {d.lng.toFixed(4)}° E
+                            {coord(d.lat, d.lng)}
                           </div>
                           <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-2">
                             <span>{d.timestamp}</span>
@@ -150,7 +116,7 @@ export function Header() {
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-semibold text-slate-800">Survivor Acknowledged</div>
                           <div className="text-xs text-slate-500 truncate">
-                            {d.lat.toFixed(4)}° N, {d.lng.toFixed(4)}° E
+                            {coord(d.lat, d.lng)}
                           </div>
                           <div className="text-[10px] text-slate-400 mt-0.5">
                             {d.timestamp} · {Math.round(d.confidence)}%

@@ -1,0 +1,22 @@
+AERIS Implementation Complete
+============================
+
+All code fixes, network configuration, and hardware verification completed.
+
+STATUS: READY FOR MANUAL HOTSPOT ACTIVATION
+
+Home Wi-Fi (fh_ssid1) preserved throughout all development.
+
+Key fixes applied:
+1. Dynamic hostname URLs in frontend (no more hardcoded localhost:8000)
+2. MLX90640 thermal camera restored (library install + I2C verification)
+3. OpenStreetMap offline strategy documented (disclaimer comments)
+4. AERIS hotspot profile configured and saved (not activated)
+
+Next steps - user performs manual activation:
+  nmcli con up aeris-hotspot
+
+Then test with client devices:
+  - Connect to AERIS-GroundStation Wi-Fi
+  - Open http://192.168.4.1
+  - Verify dashboard, thermal feed, map, WebSocket
