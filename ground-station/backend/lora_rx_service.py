@@ -78,16 +78,32 @@ REG_PKT_SNR_VALUE = 0x19
 _OPMODE_RXCONT_LF = 0x8D
 # Modem config matching the AERIS drone transmitter (drone-onboard sender.py):
 #   433.000 MHz, BW 500 kHz, SF6, CR 4/5, explicit header, CRC on,
-#   preamble 6, sync word 0x34 (pySX127x leaves RegSyncWord at chip default).
+#   preamble 6.
 REG_WRITE_MODEM_CONFIG_1 = 0x92   # BW=500 kHz (9), CR=4/5, explicit header
 REG_WRITE_MODEM_CONFIG_2 = 0x64   # SF6 (6), CRC on
 REG_WRITE_MODEM_CONFIG_3 = 0x04   # AGC auto on, low data rate optimize off
 REG_WRITE_PREAMBLE_LSB = 0x06     # preamble length 6
-REG_WRITE_SYNC_WORD = 0x34        # chip default sync word (drone never sets one)
 # IRQ flag bits
 _IRQ_RX_TIMEOUT = 0x80
 _IRQ_RX_DONE = 0x40
 _IRQ_PAYLOAD_CRC_ERROR = 0x20
+
+# ── Shared radio configuration ──────────────────────────────────────────────
+# The values live in lora_protocol.py, the module BOTH ends of the link use
+# (this file imports it as _proto above). SYNC_WORD in particular MUST be
+# identical on the drone and on the ground: the SX1276/78 in LoRa mode only
+# accepts packets whose private network word matches its own.
+#
+# The drone transmitter cannot change its own sync word - pySX127x
+# implements set_sync_word() as a NO-OP STUB (SX127x/LoRa.py), so the drone
+# radio always keeps the SX1276/78 silicon default 0x12. The ground
+# receiver therefore programs 0x12; anything else made the two radios
+# unable to decode each other (observed: dio0_irq_count climbing while
+# rx_count stayed at 0 and crc_fail grew).
+try:
+    REG_WRITE_SYNC_WORD = int(_proto.SYNC_WORD)
+except Exception:  # pragma: no cover - the protocol module is always present
+    REG_WRITE_SYNC_WORD = 0x12
 
 
 class LoRaRxService:
@@ -133,6 +149,19 @@ class LoRaRxService:
         self._rx_errors = 0
         self._pending_packets = []
 
+        # ── Lifecycle bookkeeping ──────────────────────────────────────────
+        # _lifecycle serialises start()/stop() so a re-initialisation can
+        # never race with a shutdown.
+        self._lifecycle = threading.Lock()
+        # _reinit_pending guards against two recovery attempts running at
+        # the same time (each one would open its own SPI handle).
+        self._reinit_pending = False
+        self._reinit_count = 0
+        self._last_reinit = None
+        self._last_error = None
+        # The sync word that was READ BACK from the radio register 0x39.
+        self._sync_word = None
+
     @property
     def hardware_available(self) -> bool:
         return self._hardware_available
@@ -157,88 +186,123 @@ class LoRaRxService:
         it put into continuous RX and its DIO0 line watched. When anything is
         missing the service stays down and reports why - it never invents
         reception data.
-        """
-        try:
-            spi, info = _sensors.sx1278_init(0)
-        except Exception as exc:
-            logger.warning(f"LoRa RX: hardware init failed: {exc}")
-            self._reason = f"hardware init failed: {exc}"
-            return False
 
-        if not info.get("available"):
-            self._reason = info.get("reason") or "no LoRa radio answered on SPI"
-            logger.warning(f"LoRa RX unavailable: {self._reason}")
-            if spi is not None:
+        IDEMPOTENT: calling start() on an already running service is a no-op.
+        The radio has exactly one SPI handle and one DIO0 watcher - a second
+        start() would open a second handle on the same radio and start a
+        second edge watcher fighting over it.
+        """
+        with self._lifecycle:
+            if self._running:
+                # Already running - never open a second SPI handle.
+                return True
+
+            try:
+                spi, info = _sensors.sx1278_init(0)
+            except Exception as exc:
+                logger.warning(f"LoRa RX: hardware init failed: {exc}")
+                self._reason = f"hardware init failed: {exc}"
+                self._last_error = self._reason
+                return False
+
+            if not info.get("available"):
+                self._reason = info.get("reason") or "no LoRa radio answered on SPI"
+                self._last_error = self._reason
+                logger.warning(f"LoRa RX unavailable: {self._reason}")
+                if spi is not None:
+                    try:
+                        spi.close()
+                    except Exception:
+                        pass
+                return False
+
+            self._spi = spi
+            try:
+                # Continuous RX on the 433 MHz low band (LF bit set),
+                # matching the AERIS drone transmitter (see constants above).
+                self._wr(REG_MODEM_CONFIG_1, REG_WRITE_MODEM_CONFIG_1)
+                self._wr(REG_MODEM_CONFIG_2, REG_WRITE_MODEM_CONFIG_2)
+                self._wr(REG_MODEM_CONFIG_3, REG_WRITE_MODEM_CONFIG_3)
+                self._wr(REG_PREAMBLE_MSB, 0x00)
+                self._wr(REG_PREAMBLE_LSB, REG_WRITE_PREAMBLE_LSB)
+                self._wr(REG_SYNC_WORD, REG_WRITE_SYNC_WORD)
+                self._wr(REG_FIFO_RX_BASE_ADDR, 0x80)
+                self._wr(REG_IRQ_FLAGS, 0xFF)          # clear stale flags
+                self._wr(REG_OP_MODE, _OPMODE_RXCONT_LF)  # RXCONT + LF band
+                self._radio_model = info.get("model") or "SX1276/SX1278"
+                self._frequency_mhz = info.get("frequency_mhz") or self._frequency
+                self._hardware_available = True
+                self._reason = None
+                # READ BACK the sync word that is actually in the radio
+                # register. The value is reported, never assumed.
+                try:
+                    self._sync_word = self._rd(REG_SYNC_WORD)
+                except Exception as exc:
+                    self._sync_word = None
+                    logger.warning(f"LoRa RX: could not read back the sync word: {exc}")
+                self._last_error = None
+            except Exception as exc:
+                self._hardware_available = False
+                self._reason = f"radio init failed: {exc}"
+                self._last_error = self._reason
+                logger.error(f"LoRa RX init failed: {exc}")
                 try:
                     spi.close()
                 except Exception:
                     pass
-            return False
+                self._spi = None
+                return False
 
-        self._spi = spi
-        try:
-            # Continuous RX on the 433 MHz low band (LF bit set),
-            # matching the AERIS drone transmitter (see constants above).
-            self._wr(REG_MODEM_CONFIG_1, REG_WRITE_MODEM_CONFIG_1)
-            self._wr(REG_MODEM_CONFIG_2, REG_WRITE_MODEM_CONFIG_2)
-            self._wr(REG_MODEM_CONFIG_3, REG_WRITE_MODEM_CONFIG_3)
-            self._wr(REG_PREAMBLE_MSB, 0x00)
-            self._wr(REG_PREAMBLE_LSB, REG_WRITE_PREAMBLE_LSB)
-            self._wr(REG_SYNC_WORD, REG_WRITE_SYNC_WORD)
-            self._wr(REG_FIFO_RX_BASE_ADDR, 0x80)
-            self._wr(REG_IRQ_FLAGS, 0xFF)          # clear stale flags
-            self._wr(REG_OP_MODE, _OPMODE_RXCONT_LF)  # RXCONT + LF band
-            self._radio_model = info.get("model") or "SX1276/SX1278"
-            self._frequency_mhz = info.get("frequency_mhz") or self._frequency
-            self._hardware_available = True
-            self._reason = None
-        except Exception as exc:
-            self._hardware_available = False
-            self._reason = f"radio init failed: {exc}"
-            logger.error(f"LoRa RX init failed: {exc}")
-            try:
-                spi.close()
-            except Exception:
-                pass
-            return False
-
-        self._running = True
-        self._watcher_thread = threading.Thread(
-            target=self._dio0_watcher, daemon=True, name="aeris-lora-dio0")
-        self._watcher_thread.start()
-        self._thread = threading.Thread(
-            target=self._listen_loop, daemon=True, name="aeris-lora-rx")
-        self._thread.start()
-        logger.info(
-            f"LoRa RX started on a real {self._radio_model} at "
-            f"{self._frequency_mhz} MHz (SF7/BW125, sync 0x12, DIO0 on GPIO{_gpio.DIO0})"
-        )
-        return True
+            self._running = True
+            self._reinit_pending = False
+            self._watcher_thread = threading.Thread(
+                target=self._dio0_watcher, daemon=True, name="aeris-lora-dio0")
+            self._watcher_thread.start()
+            self._thread = threading.Thread(
+                target=self._listen_loop, daemon=True, name="aeris-lora-rx")
+            self._thread.start()
+            logger.info(
+                f"LoRa RX started on a real {self._radio_model} at "
+                f"{self._frequency_mhz} MHz (SF6/BW500, CR4/5, sync "
+                f"{('0x%02x' % self._sync_word) if self._sync_word is not None else 'n/a'}, "
+                f"DIO0 on GPIO{_gpio.DIO0})"
+            )
+            return True
 
     def stop(self):
-        self._running = False
-        for t in (self._watcher_thread, self._thread):
-            if t:
-                t.join(timeout=2.0)
-        # Leave the radio in LoRa standby on 433 MHz (safe resting state).
-        try:
+        """Stop the RX service and release the radio.
+
+        IMPORTANT: this never joins the thread that is calling it. The
+        listener thread used to call stop() in order to re-initialise the
+        radio, and joining itself raises RuntimeError("cannot join current
+        thread") - which aborted the whole recovery path and left the
+        receiver dead.
+        """
+        with self._lifecycle:
+            self._running = False
+            current = threading.current_thread()
+            for t in (self._watcher_thread, self._thread):
+                if t is not None and t is not current and t.is_alive():
+                    t.join(timeout=2.0)
+            # Leave the radio in LoRa standby on 433 MHz (safe resting state).
+            try:
+                if self._spi is not None:
+                    self._wr(REG_OP_MODE, 0x89)
+                    self._wr(REG_IRQ_FLAGS, 0xFF)
+            except Exception:
+                pass
+            if self._dio0_request is not None:
+                try:
+                    self._dio0_request.release()
+                except Exception:
+                    pass
+                self._dio0_request = None
             if self._spi is not None:
-                self._wr(REG_OP_MODE, 0x89)
-                self._wr(REG_IRQ_FLAGS, 0xFF)
-        except Exception:
-            pass
-        if self._dio0_request is not None:
-            try:
-                self._dio0_request.release()
-            except Exception:
-                pass
-            self._dio0_request = None
-        if self._spi is not None:
-            try:
-                self._spi.close()
-            except Exception:
-                pass
-            self._spi = None
+                try:
+                    self._spi.close()
+                except Exception:
+                    pass
+                self._spi = None
 
     def get_status(self) -> dict:
         """Return current RX status for backend/frontend."""
@@ -258,6 +322,16 @@ class LoRaRxService:
                 "dio0_irq_count": self._dio0_irq_count,
                 "rx_errors": self._rx_errors,
                 "reason": self._reason,
+                # Recovery visibility: a silent recovery is indistinguishable
+                # from a healthy receiver on the dashboard.
+                "reinit_count": self._reinit_count,
+                "last_reinit": self._last_reinit,
+                "last_error": self._last_error,
+                "reinit_pending": self._reinit_pending,
+                # The sync word actually read back from the radio.
+                "sync_word": (
+                    "0x%02x" % self._sync_word if self._sync_word is not None else None
+                ),
             }
 
     # ── DIO0 watcher (interrupt, with polling fallback) ─────────────────────
@@ -394,18 +468,59 @@ class LoRaRxService:
                     self._rx_errors += 1
                 time.sleep(0.5)
                 # Reconnect: re-initialise the radio after repeated failures.
+                # The re-initialisation runs on a DEDICATED thread - it used
+                # to run inline here, where stop() tried to join this very
+                # thread and raised "cannot join current thread".
                 with self._lock:
                     errors = self._rx_errors
                 if errors >= 10:
-                    logger.warning("LoRa RX: too many errors — reinitialising the radio")
-                    try:
-                        self.stop()
-                        time.sleep(0.5)
-                        self.start()
-                    except Exception:
-                        logger.error("LoRa RX reconnect failed")
-                    with self._lock:
-                        self._rx_errors = 0
+                    logger.warning("LoRa RX: too many errors - reinitialising the radio")
+                    self._schedule_reinit("too many RX errors")
+                    # Leave the loop: the recovery thread takes over the radio.
+                    return
+                with self._lock:
+                    self._rx_errors = 0
+
+    def _schedule_reinit(self, reason: str):
+        """Hand the radio over to a fresh instance on a dedicated thread.
+
+        Only one recovery may run at a time (_reinit_pending), so two
+        failures cannot open two SPI handles on the same radio.
+        """
+        with self._lock:
+            if self._reinit_pending:
+                logger.warning("LoRa RX: a re-initialisation is already running")
+                return
+            self._reinit_pending = True
+            self._reinit_count += 1
+            self._last_reinit = datetime.now().isoformat()
+        logger.warning(f"LoRa RX: scheduling a radio re-initialisation ({reason})")
+        threading.Thread(
+            target=self._reinit_worker,
+            args=(reason,),
+            daemon=True,
+            name="aeris-lora-reinit",
+        ).start()
+
+    def _reinit_worker(self, reason: str):
+        """Stop the receiver and start it again on the same radio."""
+        try:
+            # stop() is called from THIS thread, which is neither the listener
+            # nor the DIO0 watcher - so the join inside it is safe.
+            self.stop()
+            time.sleep(0.5)
+            started = self.start()
+            if started:
+                logger.info("LoRa RX: radio re-initialised successfully")
+            else:
+                self._last_error = self._reason or "re-initialisation failed"
+                logger.error(f"LoRa RX: re-initialisation failed: {self._last_error}")
+        except Exception as exc:
+            self._last_error = f"reconnect failed: {exc}"
+            logger.error(f"LoRa RX reconnect failed: {exc}")
+        finally:
+            with self._lock:
+                self._reinit_pending = False
 
     def _handle_packet(self, raw: bytes):
         """Process a received raw packet."""

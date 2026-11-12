@@ -171,6 +171,12 @@ def _is_lan_client(host: str) -> bool:
     return any(ip in net for net in _LAN_NETWORKS)
 
 
+# Paths that require a credential. "/api/" covers the whole REST surface;
+# "/thermal_feed" is the MJPEG stream of live thermal imagery and must not be
+# readable by an unauthenticated client on the local network either.
+_PROTECTED_PREFIXES = ("/api/", "/thermal_feed")
+
+
 class AERISAuthMiddleware(BaseHTTPMiddleware):
     """Token auth for /api/* (header only - never in URLs) + LAN-only access control.
 
@@ -181,7 +187,7 @@ class AERISAuthMiddleware(BaseHTTPMiddleware):
         client_host = request.client.host if request.client else ""
         if not _is_lan_client(client_host):
             return JSONResponse(status_code=403, content={"detail": "Forbidden: LAN access only"})
-        if request.url.path.startswith("/api/"):
+        if request.url.path.startswith(_PROTECTED_PREFIXES):
             token = ""
             auth_header = request.headers.get("authorization")
             if auth_header and auth_header.lower().startswith("bearer "):
@@ -222,7 +228,55 @@ if _os.path.isdir(_FRONTEND_DIST):
                 return _handler
             app.get(f"/{_static_name}", include_in_schema=False)(_make_static_handler(_static_path))
 
+# ── WebSocket fan-out limits ─────────────────────────────────────────────────
+#
+# FastAPI serves every route AND every WebSocket on ONE asyncio event loop.
+# Two consequences drive the code below:
+#
+#   * A client that stops reading (TCP zero-window, a sleeping laptop, a
+#     Wi-Fi power-save stall) makes `await send_json()` block forever.
+#     WS_SEND_TIMEOUT_S bounds that wait, so ONE stalled client can no
+#     longer freeze the REST API, the thermal feed and every other
+#     dashboard at the same time.
+#   * The connection list is mutated by other tasks (connect/disconnect),
+#     so broadcast() must iterate a SNAPSHOT. Mutating the list while it is
+#     being iterated raises "RuntimeError: list changed size during
+#     iteration", which aborted the whole broadcast and left the remaining
+#     clients without data - the dashboard then showed every component as
+#     disconnected until the next cycle.
+WS_SEND_TIMEOUT_S = 2.0
+
+
+def _json_safe(value):
+    """Recursively replace non-finite floats with ``None``.
+
+    Starlette's ``send_json()`` serialises with ``allow_nan=False``, so a
+    single NaN coming from a sensor raises and kills the broadcast for
+    EVERY client. A non-finite value is not a measurement, so it is
+    transported as ``null`` (absent) instead of being silently coerced
+    into a number.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 class ConnectionManager:
+    """Fan-out of live updates to the connected dashboards.
+
+    Three properties are guaranteed:
+
+      * one failing client never interrupts the others,
+      * one stalled client never blocks the shared event loop,
+      * a closed client is never left behind in the list.
+    """
+
     def __init__(self):
         self.active_connections: List[WebSocket] = []
 
@@ -236,12 +290,34 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    def _drop(self, websocket: WebSocket, reason: str):
+        """Remove a dead client from the fan-out list.
+
+        A client that is left in the list is retried on EVERY broadcast
+        (every 2 s) and produces a failure line each time - the connection
+        leak that was visible in the journal as a repeating
+        "broadcast to a client failed" message.
+        """
+        self.disconnect(websocket)
+        print(f"[WS] client dropped: {reason}")
+
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
+        # Sanitise once, outside the loop: a non-finite value must never
+        # abort the delivery to the remaining clients.
+        payload = _json_safe(message)
+        # Iterate over a SNAPSHOT - disconnect() runs from another task and
+        # mutates self.active_connections while we await.
+        for connection in list(self.active_connections):
             try:
-                await connection.send_json(message)
+                await asyncio.wait_for(
+                    connection.send_json(payload), timeout=WS_SEND_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                # The client stopped reading. Drop it rather than letting
+                # it stall the event loop for every other client.
+                self._drop(connection, f"send timeout after {WS_SEND_TIMEOUT_S}s")
             except Exception as exc:
-                print(f"[WS] broadcast to a client failed: {type(exc).__name__}: {exc}")
+                self._drop(connection, f"{type(exc).__name__}: {exc}")
 
 manager = ConnectionManager()
 
@@ -355,7 +431,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        pass
     except asyncio.TimeoutError:
         # No auth frame arrived in time.
         try:
@@ -368,6 +444,12 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1011, reason="internal error")
         except Exception:
             pass
+    finally:
+        # EVERY exit path removes the socket from the fan-out list. Before
+        # this, a client that left through any path other than
+        # WebSocketDisconnect stayed in the list for ever and was retried
+        # (and logged as a failure) on every single broadcast.
+        manager.disconnect(websocket)
 
 @app.get("/health")
 async def health_check():
@@ -503,12 +585,111 @@ _thermal_last_frame_iso: str | None = None
 _thermal_last_error: str | None = None
 _thermal_last_error_ts: float = 0.0
 
+# ── MLX90640 capture lifecycle ────────────────────────────────────────────
+#
+# TWO DIFFERENT TIMEOUTS ARE INVOLVED AND THEY ARE NOT THE SAME THING:
+#
+#  1. THERMAL_FRAME_TIMEOUT_S is a PYTHON-LEVEL deadline that is checked
+#     BETWEEN I2C transactions. It bounds the vendor library's unbounded
+#     "while dataReady == 0" wait, i.e. the case where the sensor is
+#     reachable but stops producing new frames. This case IS recoverable
+#     in-process: the frame is abandoned, the sensor is re-initialised
+#     and the capture continues.
+#
+#  2. The KERNEL's I2C adapter timeout governs a transaction that is
+#     already blocked inside the kernel (for example a device that holds
+#     SDA low, or a wedged bus). A Python deadline CANNOT interrupt that:
+#     the thread is blocked inside the ioctl and only returns when the
+#     kernel gives up. There is no in-process recovery for that case -
+#     a thread blocked in a syscall cannot be cancelled from Python.
+#     It is detected with the capture thread's HEARTBEAT (which stops
+#     advancing while the thread sits in the transaction) and reported as
+#     the distinct state "stalled".
+#
+# The two states are kept apart on purpose: the dashboard must be able to
+# tell "the sensor went quiet" (auto-recoverable) from "the bus is wedged"
+# (not auto-recoverable, needs an operator/restart).
+THERMAL_FRAME_TIMEOUT_S = 3.0
+# Back-off between sensor re-initialisation attempts (seconds).
+THERMAL_REINIT_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
+# Consecutive read failures after which the sensor is re-initialised.
+THERMAL_REINIT_AFTER = 10
+# Consecutive read failures after which the failure is published to the UI.
+THERMAL_ERROR_PUBLISH_AFTER = 3
+# The capture thread's heartbeat older than this => the thread is stuck
+# inside a kernel I2C transaction (the Python deadline cannot fire).
+THERMAL_STALL_S = 10.0
+
+# Live state of the capture thread - observed from OUTSIDE the thread.
+_thermal_capture_state = {
+    "phase": "starting",        # starting | running | quiet | stalled | failed
+    "heartbeat": 0.0,           # monotonic timestamp of the last loop iteration
+    "reinit_count": 0,
+    "consecutive_failures": 0,
+    "invalid_samples": 0,       # non-finite pixels in the last rejected frame
+    "last_error": None,
+    "backoff_s": 0.0,
+}
+
+
+class ThermalTimeoutError(RuntimeError):
+    """The MLX90640 did not deliver a frame within the Python-level deadline."""
+
+
+class _FrameDeadline:
+    """Python-level deadline, checked BETWEEN I2C transactions.
+
+    This is NOT an I2C transaction timeout: it cannot interrupt a transfer
+    that is already blocked inside the kernel (see THERMAL_STALL_S).
+    """
+
+    __slots__ = ("until",)
+
+    def __init__(self):
+        self.until = 0.0
+
+    def arm(self, seconds: float):
+        self.until = time.monotonic() + seconds
+
+    def disarm(self):
+        self.until = 0.0
+
+    def check(self):
+        if self.until and time.monotonic() > self.until:
+            raise ThermalTimeoutError(
+                f"no frame from the MLX90640 within {THERMAL_FRAME_TIMEOUT_S}s"
+            )
+
 
 def _thermal_frame_age_s() -> float | None:
     """Seconds since the last real MLX90640 frame (None when never seen)."""
     if not _thermal_last_frame_ts:
         return None
     return max(0.0, time.monotonic() - _thermal_last_frame_ts)
+
+
+def _thermal_capture_phase() -> str:
+    """Classify the capture thread from the outside.
+
+    ``running``  frames are arriving
+    ``quiet``    the thread is alive but the sensor produces no frames
+                 (auto-recoverable - the Python deadline fires and the
+                 sensor is re-initialised)
+    ``stalled``  the thread is blocked inside a kernel I2C transaction
+                 (NOT auto-recoverable in-process: a Python deadline
+                 cannot interrupt a transaction that is already blocked)
+    ``failed``   the sensor could not be initialised at all
+    """
+    hb = _thermal_capture_state.get("heartbeat") or 0.0
+    if not hb:
+        return "starting"
+    hb_age = time.monotonic() - hb
+    if hb_age > THERMAL_STALL_S:
+        return "stalled"
+    age = _thermal_frame_age_s()
+    if age is not None and age > THERMAL_STALE_S:
+        return "quiet"
+    return "running"
 
 
 def _thermal_status_snapshot() -> dict:
@@ -521,16 +702,32 @@ def _thermal_status_snapshot() -> dict:
         data = dict(_thermal_status)
     age = _thermal_frame_age_s()
     fresh = age is not None and age <= THERMAL_STALE_S
+    phase = _thermal_capture_phase()
     data["last_frame"] = _thermal_last_frame_iso
     data["frame_age_s"] = round(age, 2) if age is not None else None
     data["stale"] = bool(age is not None and not fresh)
     data["last_error"] = _thermal_last_error
+    data["capture_phase"] = phase
+    data["capture_reinit_count"] = _thermal_capture_state.get("reinit_count", 0)
+    data["capture_consecutive_failures"] = _thermal_capture_state.get("consecutive_failures", 0)
+    data["invalid_samples"] = _thermal_capture_state.get("invalid_samples", 0)
+    data["frame_timeout_s"] = THERMAL_FRAME_TIMEOUT_S
     if data.get("ok") and not fresh:
         # The last frame is too old to be trusted any more.
         data["ok"] = False
         data["error"] = (
             f"no frame from the MLX90640 for {age:.1f}s"
             if age is not None else "no frame from the MLX90640 yet"
+        )
+    if phase == "stalled":
+        # The capture thread is blocked inside a kernel I2C transaction.
+        # The Python-level frame deadline cannot interrupt it, so this is
+        # reported as a distinct, non self-healing state.
+        data["ok"] = False
+        data["error"] = (
+            "capture thread stalled inside an I2C transaction - the sensor "
+            "must be re-initialised (a Python deadline cannot interrupt a "
+            "blocked kernel transfer)"
         )
     return data
 
@@ -1323,6 +1520,114 @@ def _select_refresh_rate(mlx):
     return chosen
 
 
+def _init_thermal_sensor():
+    """Bring up the MLX90640.
+
+    Returns ``(mlx, i2c, error)``. Split out of the capture loop so that
+    the sensor can be re-created deterministically (and the previous bus
+    handle released) and so the tests can replace it with a fake.
+    """
+    import board
+    import busio
+    import adafruit_mlx90640
+    i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+    mlx = adafruit_mlx90640.MLX90640(i2c, address=THERMAL_I2C_ADDRESS)
+    _select_refresh_rate(mlx)
+    return mlx, i2c, None
+
+
+def _release_thermal_sensor(mlx, i2c):
+    """Release the bus handle of a sensor that is being replaced.
+
+    The previous code re-created the sensor without closing the old
+    ``busio.I2C`` handle, leaking one file descriptor on EVERY re-init.
+    """
+    for handle in (i2c,):
+        try:
+            if handle is not None and hasattr(handle, "close"):
+                handle.close()
+        except Exception:
+            pass
+    try:
+        if mlx is not None and hasattr(mlx, "i2c_device"):
+            device = getattr(mlx, "i2c_device", None)
+            if device is not None and hasattr(device, "close"):
+                device.close()
+    except Exception:
+        pass
+
+
+def _arm_frame_guard(mlx, deadline: _FrameDeadline):
+    """Bound the vendor library's unbounded data-ready wait.
+
+    adafruit-circuitpython-mlx90640 1.3.9 waits for the data-ready bit in
+    an unbounded ``while dataReady == 0`` loop (adafruit_mlx90640.py:146).
+    The instance's I2C primitives are wrapped so the deadline is checked
+    BETWEEN transactions.
+
+    SCOPE - this is a PYTHON-LEVEL guarantee only. It bounds the case
+    "the sensor is reachable but produces no new frame". It does NOT
+    interrupt a transfer that is already blocked inside the kernel; that
+    case is detected through the capture thread's heartbeat and reported
+    as the distinct "stalled" state (see THERMAL_STALL_S).
+
+    Signatures verified against adafruit-circuitpython-mlx90640 1.3.9:
+        _I2CReadWords(self, addr, buffer, *, end=None)
+        _I2CWriteWord(self, writeAddress, data)
+    """
+    if mlx is None:
+        return False
+    if getattr(mlx, "_aeris_guard_armed", False):
+        return True
+    original_read = mlx._I2CReadWords
+    original_write = mlx._I2CWriteWord
+
+    def guarded_read(addr, buffer, *, end=None):
+        deadline.check()
+        return original_read(addr, buffer, end=end)
+
+    def guarded_write(addr, data):
+        deadline.check()
+        return original_write(addr, data)
+
+    mlx._I2CReadWords = guarded_read
+    mlx._I2CWriteWord = guarded_write
+    mlx._aeris_guard_armed = True
+    return True
+
+
+def _thermal_reinit(mlx, i2c, deadline: _FrameDeadline, backoff_idx: int):
+    """Release the current sensor and bring a new one up, with back-off.
+
+    Returns ``(mlx, i2c, backoff_idx, error_or_None)``.
+
+    The back-off grows with every consecutive failed attempt
+    (1, 2, 4, 8, 16, 30 s and then stays at 30 s), so a sensor that stays
+    unavailable can never spin the CPU or flood the bus. The previous
+    bus handle is closed FIRST - the old code re-created the sensor
+    without closing the old handle and leaked one file descriptor on
+    every re-initialisation.
+    """
+    _release_thermal_sensor(mlx, i2c)
+    delay = THERMAL_REINIT_BACKOFF_S[
+        min(backoff_idx, len(THERMAL_REINIT_BACKOFF_S) - 1)
+    ]
+    backoff_idx += 1
+    _thermal_capture_state["reinit_count"] += 1
+    _thermal_capture_state["backoff_s"] = delay
+    # Back off before touching the bus again.
+    time.sleep(delay)
+    try:
+        new_mlx, new_i2c, _ = _init_thermal_sensor()
+        _arm_frame_guard(new_mlx, deadline)
+        # The back-off is reset by a successful bring-up. The failure
+        # counter is reset by a successful FRAME - never by a successful
+        # re-initialisation.
+        return new_mlx, new_i2c, 0, None
+    except Exception as exc:
+        return None, None, backoff_idx, f"reinit failed: {exc}"
+
+
 def _thermal_capture_loop():
     """Background thread: read real MLX90640 frames and update shared JPEG."""
     # NOTE: _thermal_frame MUST be declared global - otherwise the assignments
@@ -1334,21 +1639,22 @@ def _thermal_capture_loop():
     import numpy as np
 
     lut = _build_thermal_lut()
+    deadline = _FrameDeadline()
 
     # Init sensor with retries (first reads can transiently fail)
     mlx = None
+    i2c = None
     last_err = None
     for attempt in range(6):
+        _thermal_capture_state["heartbeat"] = time.monotonic()
         try:
-            import board
-            import busio
-            import adafruit_mlx90640
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-            mlx = adafruit_mlx90640.MLX90640(i2c, address=THERMAL_I2C_ADDRESS)
-            _select_refresh_rate(mlx)
+            mlx, i2c, last_err = _init_thermal_sensor()
+            _arm_frame_guard(mlx, deadline)
             last_err = None
             break
         except Exception as e:
+            mlx = None
+            i2c = None
             last_err = str(e)
             time.sleep(1.0)
 
@@ -1356,6 +1662,8 @@ def _thermal_capture_loop():
         msg = f"Sensor init failed @{THERMAL_I2C_ADDRESS_STR}: {last_err}"
         _thermal_last_error = last_err
         _thermal_last_error_ts = time.monotonic()
+        _thermal_capture_state["phase"] = "failed"
+        _thermal_capture_state["last_error"] = last_err
         with _thermal_lock:
             if globals().get("_mjpeg_clients", 0):
                 _thermal_jpeg = _render_thermal_jpeg(None, 0, 0, lut, error_text=msg)
@@ -1369,18 +1677,55 @@ def _thermal_capture_loop():
     frame = [0.0] * 768
     consec_fail = 0
     retry_overflow = 0
+    backoff_idx = 0
     while True:
+        # The heartbeat lets an OUTSIDE observer distinguish two very
+        # different failures:
+        #   * the thread keeps ticking but no frame arrives -> the sensor is
+        #     quiet -> the Python-level deadline applies and the sensor is
+        #     re-initialised automatically;
+        #   * the heartbeat stops advancing -> the thread is blocked inside
+        #     a kernel I2C transaction -> no Python deadline can interrupt
+        #     it, so that state is reported separately (see
+        #     _thermal_capture_phase).
+        _thermal_capture_state["heartbeat"] = time.monotonic()
+        if mlx is None:
+            # The sensor could not be (re-)initialised. Keep the thread
+            # alive, back off and try again - the rest of the ground
+            # station is not affected by this component.
+            mlx, i2c, backoff_idx, reinit_err = _thermal_reinit(
+                None, None, deadline, backoff_idx
+            )
+            if reinit_err:
+                _thermal_last_error = reinit_err
+                _thermal_last_error_ts = time.monotonic()
+                _thermal_capture_state["last_error"] = reinit_err
+                _thermal_capture_state["phase"] = "failed"
+            continue
         try:
             # Allow settle time; retry on transient errors (math domain error / retries)
             read_ok = False
             read_err = None
+            timed_out = False
+            deadline.arm(THERMAL_FRAME_TIMEOUT_S)
             for _ in range(5):
                 try:
                     # getFrame() blocks internally until the sensor signals a
                     # fresh frame (status reg 0x8000 bit 3). Sleeping first
                     # would only add latency on top of the sensor cadence.
+                    #
+                    # The deadline armed above turns that unbounded wait into
+                    # a bounded one. It is a PYTHON-level deadline checked
+                    # BETWEEN I2C transactions - it cannot interrupt a
+                    # transfer that is already blocked inside the kernel.
                     mlx.getFrame(frame)
                     read_ok = True
+                    break
+                except ThermalTimeoutError as e:
+                    read_err = str(e)
+                    timed_out = True
+                    # A deadline breach is not worth retrying: the sensor is
+                    # not producing frames, it has to be re-initialised.
                     break
                 except Exception as e:
                     read_err = str(e)
@@ -1399,23 +1744,26 @@ def _thermal_capture_loop():
                                 print("[Thermal] frame retries exceeded - dropping the sensor to 1 Hz")
                             retry_overflow = 0
                     time.sleep(0.1)
+            deadline.disarm()
             if not read_ok:
                 consec_fail += 1
+                _thermal_capture_state["consecutive_failures"] = consec_fail
+                _thermal_capture_state["phase"] = "quiet"
                 _thermal_last_error = read_err
                 _thermal_last_error_ts = time.monotonic()
-                if consec_fail >= 10:
-                    # try reinit
-                    try:
-                        import board
-                        import busio
-                        import adafruit_mlx90640
-                        i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-                        mlx = adafruit_mlx90640.MLX90640(i2c, address=THERMAL_I2C_ADDRESS)
-                        _select_refresh_rate(mlx)
-                        consec_fail = 0
-                    except Exception as e:
-                        read_err = f"reinit failed: {e}"
-                if consec_fail >= 3:
+                _thermal_capture_state["last_error"] = read_err
+                # Re-initialise the sensor: immediately for a deadline
+                # breach (the sensor answers but produces no frames),
+                # otherwise after THERMAL_REINIT_AFTER consecutive errors.
+                if timed_out or consec_fail >= THERMAL_REINIT_AFTER:
+                    mlx, i2c, backoff_idx, reinit_err = _thermal_reinit(
+                        mlx, i2c, deadline, backoff_idx
+                    )
+                    if reinit_err:
+                        read_err = reinit_err
+                        _thermal_last_error = reinit_err
+                        _thermal_capture_state["last_error"] = reinit_err
+                if timed_out or consec_fail >= THERMAL_ERROR_PUBLISH_AFTER:
                     jpg = None
                     if globals().get("_mjpeg_clients", 0):
                         jpg = _render_thermal_jpeg(None, 0, 0, lut, error_text=f"Read error: {read_err}")
@@ -1428,7 +1776,35 @@ def _thermal_capture_loop():
                 continue
 
             consec_fail = 0
+            _thermal_capture_state["consecutive_failures"] = 0
             arr = np.array(frame, dtype=np.float32).reshape((24, 32))
+            # A frame that contains non-finite samples is NOT a measurement.
+            # Those values are discarded with the whole frame and the
+            # condition is reported - they must never reach the dashboard as
+            # if they were real readings.
+            invalid = int((~np.isfinite(arr)).sum())
+            if invalid:
+                _thermal_capture_state["invalid_samples"] = invalid
+                _thermal_capture_state["phase"] = "quiet"
+                invalid_err = (
+                    f"{invalid} invalid (non-finite) sample(s) in the MLX90640 "
+                    f"frame - the frame was discarded"
+                )
+                _thermal_last_error = invalid_err
+                _thermal_last_error_ts = time.monotonic()
+                _thermal_capture_state["last_error"] = invalid_err
+                jpg = None
+                if globals().get("_mjpeg_clients", 0):
+                    jpg = _render_thermal_jpeg(None, 0, 0, lut, error_text=invalid_err)
+                with _thermal_lock:
+                    if jpg is not None:
+                        _thermal_jpeg = jpg
+                    _thermal_frame = None
+                    _thermal_status.update({"ok": False, "error": invalid_err, "fps": None})
+                _broadcast_thermal_frame({"type": "thermal_frame", "matrix": None, "error": invalid_err, "timestamp": datetime.now().isoformat()})
+                continue
+            _thermal_capture_state["invalid_samples"] = 0
+            _thermal_capture_state["phase"] = "running"
             globals()["_last_matrix"] = arr.copy()  # for detection diagnostics
             mn, mx, mean = float(arr.min()), float(arr.max()), float(arr.mean())
             # Measure the real frame rate of the sensor feed
@@ -1621,7 +1997,18 @@ async def sensors_status():
 
 @app.get("/thermal_feed")
 async def thermal_feed():
-    """MJPEG stream of real MLX90640 (32x24) thermal frames with colormap."""
+    """MJPEG stream of real MLX90640 (32x24) thermal frames with colormap.
+
+    DEPRECATED for browser use - the dashboard renders the thermal image on a
+    canvas from the WebSocket matrix, it does not consume this stream.
+
+    This endpoint streams live thermal imagery, so it requires a credential
+    like every other protected surface (operator OR viewer token is enough -
+    it is a read-only stream). The authentication is enforced by
+    AERISAuthMiddleware BEFORE this handler runs, so an unauthenticated
+    caller never reaches the generator and never starts the (expensive)
+    per-frame JPEG rendering.
+    """
     _ensure_thermal_thread()
     boundary = "frame"
 

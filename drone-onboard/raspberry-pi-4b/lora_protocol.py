@@ -9,6 +9,34 @@ Provides compact binary framing for drone <-> ground LoRa communication:
 import struct
 import zlib
 
+# ---------------------------------------------------------------------------
+# Radio configuration - SHARED by the drone transmitter and the ground receiver
+# ---------------------------------------------------------------------------
+# These values MUST be identical on both ends of the link. The ground
+# receiver imports THIS module (lora_rx_service.py puts the drone-onboard
+# directory on sys.path), so the project has exactly one definition of the
+# radio configuration and the two ends cannot drift apart unnoticed.
+#
+# SYNC_WORD is the critical one. In LoRa mode the SX1276/78 only accepts a
+# packet whose private network word matches its own. pySX127x implements
+# set_sync_word() as a NO-OP STUB (SX127x/LoRa.py), so the drone radio can
+# never leave the silicon default 0x12. The ground receiver therefore has
+# to program 0x12 as well: programming anything else makes the two radios
+# unable to decode each other, which shows up as crc_fail climbing while
+# rx_count stays at zero.
+#
+# The drone transmitter's radio behaviour is NOT changed by these constants:
+# it keeps exactly the configuration it has today - 433 MHz, BW 500 kHz,
+# SF6, CR 4/5, preamble 6, CRC on, explicit header, sync word 0x12.
+SYNC_WORD = 0x12
+FREQUENCY_HZ = 433_000_000
+BANDWIDTH_HZ = 500_000
+SPREADING_FACTOR = 6
+CODING_RATE = "4/5"
+PREAMBLE_SYMBOLS = 6
+CRC_ON = True
+EXPLICIT_HEADER = True
+
 MAGIC = b"\xAE\x52"
 PROTOCOL_VERSION = 1
 

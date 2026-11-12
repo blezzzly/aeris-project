@@ -298,6 +298,13 @@ def _sx1278_init_locked(spi_bus=0, frequency_hz=_LORA_FREQ_HZ):
         modem1 = _sx1278_read_reg(spi, 0x1D)   # RegModemConfig1 (BW | CR)
         frf = (_sx1278_read_reg(spi, 0x06) << 16) | (_sx1278_read_reg(spi, 0x07) << 8) | _sx1278_read_reg(spi, 0x08)
         pa_config = _sx1278_read_reg(spi, 0x09)
+        # Private network word (Reg 0x39) - read back so the reported radio
+        # configuration is MEASURED, not assumed. The drone transmitter cannot
+        # change its own sync word (pySX127x implements set_sync_word() as a
+        # no-op stub), so it always uses the SX1276/78 default 0x12 and the
+        # ground receiver has to use the same value or the two radios cannot
+        # decode each other.
+        sync_word = _sx1278_read_reg(spi, 0x39)
         freq_hz = frf * (32_000_000.0 / (1 << 19))
         bandwidth = _LORA_BANDWIDTH.get((modem1 >> 4) & 0x0F, "unknown")
         low_freq = bool((opmode >> 3) & 0x01)
@@ -315,6 +322,7 @@ def _sx1278_init_locked(spi_bus=0, frequency_hz=_LORA_FREQ_HZ):
             "low_frequency_mode_on": low_freq,
             "pa_boost": bool(pa_config & 0x80),
             "pa_config": hex(pa_config),
+            "sync_word": "0x%02x" % sync_word,
             "nss_gpio": _gpio.NSS,
             "reset_gpio": _gpio.RESET,
             "dio0_gpio": _gpio.DIO0,

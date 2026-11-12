@@ -47,6 +47,28 @@ python main.py
 | `/api/detections` | GET | All detections |
 | `/api/detection` | POST | Add new detection |
 | `/api/mission` | GET | Current mission info |
+| `/thermal_feed` | GET | MJPEG stream of the live MLX90640 thermal frames |
+
+### Authentication
+
+| Path | Credential required |
+|------|--------------------|
+| `/`, `/assets/*`, `/health` | no (LAN clients only) |
+| `/api/*` | **yes** - operator or viewer bearer token |
+| `/thermal_feed` | **yes** - operator or viewer bearer token |
+
+The token is sent as `Authorization: Bearer <token>` - never in a URL. Read
+requests accept the operator or the viewer token; write requests
+(`POST`/`PUT`/`DELETE`) require the **operator** token.
+
+`/thermal_feed` streams live thermal imagery, so it is protected like every
+other data surface: an unauthenticated request is rejected with **401**
+*before* the streaming generator starts, so it never triggers the (expensive)
+per-frame JPEG rendering.
+
+> The dashboard does **not** use `/thermal_feed` - it renders the thermal image
+> on a canvas from the WebSocket matrix (`thermal_frame`). The endpoint stays
+> available for programmatic clients and is deprecated for browser use.
 
 ## WebSocket Messages
 

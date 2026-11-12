@@ -18,6 +18,18 @@ from utils import LORA_HOST, LORA_PORT, LORA_RSSI_RANGE, LORA_SNR_RANGE
 from SX127x.LoRa import *
 from SX127x.board_config import BOARD
 
+# Shared radio configuration (sync word, frequency, modulation). The ground
+# receiver imports the SAME module, so the two ends cannot drift apart.
+# The import is independent of the working directory: the module always
+# sits next to this file.
+try:
+    import lora_protocol
+except ImportError:  # pragma: no cover
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import lora_protocol
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,6 +196,19 @@ class FastLoRaTransmitter(LoRa):
         self.set_coding_rate(CODING_RATE.CR4_5)
         self.set_preamble(6)
         self.set_rx_crc(True)
+        # Private network word (sync word). In LoRa mode the SX1276/78 only
+        # accepts a packet whose sync word matches its own, so this value has
+        # to be IDENTICAL on the drone and on the ground receiver - the
+        # ground receiver programs lora_protocol.SYNC_WORD into Reg 0x39 and
+        # reads it back to prove it.
+        #
+        # pySX127x implements set_sync_word() as a NO-OP STUB (SX127x/LoRa.py):
+        # it returns the value without ever touching the register. The call
+        # is therefore kept for documentation and for a future library that
+        # implements it properly - it does NOT change the radio behaviour.
+        # The radio keeps the SX1276/78 silicon default 0x12, which is exactly
+        # what lora_protocol.SYNC_WORD defines.
+        self.set_sync_word(lora_protocol.SYNC_WORD)
 
     # Real TX state (surfaced to the ground station via status file; never treated as "connected" without ACK)
     _tx_state = "waiting"  # waiting | sending | error
