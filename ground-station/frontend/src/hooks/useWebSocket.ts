@@ -12,8 +12,28 @@ const WS_CLOSE_AUTH_REQUIRED = 4401;
 /** Close code used by the backend when the presented credential was rejected. */
 const WS_CLOSE_UNAUTHORIZED = 1008;
 
-/** Reconnect delays (ms) used when the link drops - grows slowly, capped. */
-const RECONNECT_DELAYS = [1000, 2000, 3000, 5000, 8000];
+/**
+ * Reconnect delays (ms) used when the link drops. The delay is capped at 3 s:
+ * a Wi-Fi reconnect is cheap and a long backoff would leave the dashboard
+ * dead for seconds after the link is already usable again.
+ */
+const RECONNECT_DELAYS = [1000, 2000, 3000];
+
+/** A socket that stays CONNECTING this long is abandoned and retried. */
+const CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * No message of any kind for this long means the link is half-open: the
+ * socket may still look OPEN while nothing is flowing. The backend sends a
+ * heartbeat every 10 s, so 20 s is two missed heartbeats.
+ */
+const SILENCE_TIMEOUT_MS = 20_000;
+
+/** Once a socket has been healthy this long, the backoff is reset. */
+const HEALTHY_RESET_MS = 10_000;
+
+/** How often the silence watchdog checks the socket. */
+const WATCHDOG_INTERVAL_MS = 2_000;
 
 /** Custom event dispatched by the app whenever the stored token changes. */
 export const AUTH_CHANGED_EVENT = 'aeris-auth-changed';
@@ -25,19 +45,32 @@ export function notifyAuthChanged(): void {
 
 export function useWebSocket(url: string = getWebSocketUrl()) {
   const wsRef = useRef<WebSocket | null>(null);
-  const { addDetection, setHardwareData, setTelemetry, setLoraRx, setThermalFrame, setDevices, setLinkState } =
-    useAppStore();
+  const {
+    addDetection,
+    setHardwareData,
+    setTelemetry,
+    setLoraRx,
+    setThermalFrame,
+    setDevices,
+    setLinkState,
+    markMessageReceived,
+    lastMessageAt,
+  } = useAppStore();
   // The connection state lives here, next to the socket lifecycle, so it is
   // always in sync with the real socket.
   const [connected, setConnected] = useState(false);
-  // Timestamp of the last message that arrived on the socket. The dashboard
-  // uses it to tell a live link from a stale one.
-  const [lastMessageAt, setLastMessageAt] = useState<number | null>(null);
 
   useEffect(() => {
     let disposed = false;
     let timer: number | null = null;
+    let connectTimer: number | null = null;
+    let watchdog: number | null = null;
     let attempt = 0;
+    let authenticated = false;
+    let openedAt: number | null = null;
+    // Timestamp of the last inbound frame of any kind. Kept in a ref so the
+    // watchdog does not re-create the socket effect on every message.
+    let lastActivity = Date.now();
 
     const clearTimer = () => {
       if (timer !== null) {
@@ -46,8 +79,16 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
       }
     };
 
+    const clearConnectTimer = () => {
+      if (connectTimer !== null) {
+        window.clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    };
+
     /** Close the current socket (if any) without scheduling a reconnect. */
     const dropSocket = () => {
+      clearConnectTimer();
       const ws = wsRef.current;
       wsRef.current = null;
       if (ws) {
@@ -62,6 +103,18 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
           /* ignore */
         }
       }
+    };
+
+    /** Abandon the current socket and retry with the normal backoff. */
+    const forceReconnect = (reason: string) => {
+      if (disposed) return;
+      console.warn(`WebSocket: ${reason}; reconnecting…`);
+      authenticated = false;
+      openedAt = null;
+      setConnected(false);
+      setLinkState('offline');
+      dropSocket();
+      scheduleReconnect();
     };
 
     /** Open the socket - no-op while one is already open/connecting. */
@@ -90,8 +143,22 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
         return;
       }
       wsRef.current = ws;
+      openedAt = null;
+      authenticated = false;
+      setConnected(false);
+
+      // A connection attempt that never opens (black-holed Wi-Fi, half-open
+      // TCP) must not stay CONNECTING for ever.
+      connectTimer = window.setTimeout(() => {
+        if (!disposed && wsRef.current === ws && ws.readyState === WebSocket.CONNECTING) {
+          forceReconnect('connect timeout');
+        }
+      }, CONNECT_TIMEOUT_MS);
 
       ws.onopen = () => {
+        clearConnectTimer();
+        openedAt = Date.now();
+        lastActivity = openedAt;
         // Auth handshake: first frame carries the access token (never in the URL).
         ws.send(JSON.stringify({ type: 'auth', token: localStorage.getItem('aeris_token') ?? '' }));
         console.log('WebSocket connected');
@@ -100,11 +167,30 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          setLastMessageAt(Date.now());
+          const now = Date.now();
+          lastActivity = now;
+          // Any frame proves the transport is alive; this is separate from
+          // the hardware report timestamp.
+          markMessageReceived(now);
           setLinkState('live');
+
+          if (data.type === 'ping') {
+            // Application-level heartbeat: answer so the server sees an
+            // active client. (The frontend watchdog is the authoritative
+            // half-open detector.)
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'pong',
+                ts: typeof data.ts === 'string' ? data.ts : new Date(now).toISOString(),
+              }));
+            }
+            return;
+          }
 
           if (data.type === 'auth_ok') {
             // The handshake really succeeded - the live channel is authorised.
+            authenticated = true;
+            openedAt = now;
             attempt = 0;
             setConnected(true);
           } else if (data.type === 'telemetry') {
@@ -236,10 +322,14 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
 
       ws.onerror = (err) => {
         console.error('WS error:', err);
-        setConnected(false);
+        // Do not finalise the state here: onclose follows and owns the
+        // reconnect decision.
       };
 
       ws.onclose = (ev) => {
+        clearConnectTimer();
+        authenticated = false;
+        openedAt = null;
         setConnected(false);
         if (ev.code === WS_CLOSE_UNAUTHORIZED) {
           // The presented credential was rejected: drop it and send the user
@@ -277,9 +367,46 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
     // access token has been entered.
     connect();
 
+    // Silence watchdog: a socket can look OPEN while the far side is gone
+    // (Wi-Fi roam, sleeping client, half-open TCP). Two missed heartbeats
+    // mean the link is no longer trustworthy, so close and reconnect.
+    watchdog = window.setInterval(() => {
+      if (disposed) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      if (authenticated && openedAt != null && now - openedAt >= HEALTHY_RESET_MS) {
+        // A stable, authenticated connection must not inherit a large backoff
+        // from an earlier outage.
+        attempt = 0;
+      }
+      if (now - lastActivity > SILENCE_TIMEOUT_MS) {
+        forceReconnect(`no message for ${Math.round((now - lastActivity) / 1000)} s`);
+      }
+    }, WATCHDOG_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible' || disposed) return;
+      const ws = wsRef.current;
+      const now = Date.now();
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // Background tabs throttle timers, so the scheduled retry may be late.
+        clearTimer();
+        attempt = 0;
+        connect();
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN && now - lastActivity > SILENCE_TIMEOUT_MS) {
+        forceReconnect('tab resumed after a silent period');
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     const onAuthChanged = () => {
       clearTimer();
       attempt = 0;
+      authenticated = false;
+      openedAt = null;
       const token = localStorage.getItem('aeris_token') ?? '';
       dropSocket();
       if (!token) {
@@ -297,10 +424,15 @@ export function useWebSocket(url: string = getWebSocketUrl()) {
     return () => {
       disposed = true;
       window.removeEventListener(AUTH_CHANGED_EVENT, onAuthChanged);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       clearTimer();
+      if (watchdog !== null) {
+        window.clearInterval(watchdog);
+        watchdog = null;
+      }
       dropSocket();
     };
-  }, [url, addDetection, setHardwareData, setTelemetry, setLoraRx, setThermalFrame, setDevices, setLinkState]);
+  }, [url, addDetection, setHardwareData, setTelemetry, setLoraRx, setThermalFrame, setDevices, setLinkState, markMessageReceived]);
 
   const send = (data: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

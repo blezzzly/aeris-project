@@ -141,6 +141,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. AP power save must stay disabled. Power save on an access point is a
+#     known source of missed beacons and multi-second client stalls on
+#     brcmfmac. Two things are checked: the persistent NetworkManager profile
+#     (survives the next boot) and the runtime state the driver actually has.
+# ---------------------------------------------------------------------------
+WIFI_IFACE="$(nmcli -g GENERAL.DEVICES connection show "$HOTSPOT_CON" 2>/dev/null | head -1 | tr -d ' ')"
+if [ -z "$WIFI_IFACE" ]; then
+    for iface in /sys/class/net/*/wireless; do
+        [ -e "$iface" ] || continue
+        WIFI_IFACE="$(basename "$(dirname "$iface")")"
+        break
+    done
+fi
+
+PS_PROFILE="$(nmcli -g 802-11-wireless.powersave connection show "$HOTSPOT_CON" 2>/dev/null | head -1 | tr -d ' ')"
+case "$PS_PROFILE" in
+    disable|2) check "hotspot profile has Wi-Fi power save disabled" "ok" ;;
+    *)         check "hotspot profile has Wi-Fi power save disabled" "profile value: ${PS_PROFILE:-unknown}" ;;
+esac
+
+if [ -n "$WIFI_IFACE" ] && command -v iw >/dev/null 2>&1; then
+    PS_RUNTIME="$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk -F': ' '{print $2}' | head -1)"
+    if [ "$PS_RUNTIME" = "off" ]; then
+        check "Wi-Fi power save is off on $WIFI_IFACE at runtime" "ok"
+    else
+        check "Wi-Fi power save is off on $WIFI_IFACE at runtime" "reported: ${PS_RUNTIME:-unknown}"
+    fi
+else
+    check "Wi-Fi power save is off at runtime" "interface or 'iw' unavailable"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Boot persistence: a unit that is not enabled comes back broken after the
 #    NEXT reboot, even when it is running perfectly right now.
 # ---------------------------------------------------------------------------

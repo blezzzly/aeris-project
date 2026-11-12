@@ -96,7 +96,7 @@ export function HardwareStatus() {
             I2C {connLabel(hw.i2c)} · SPI {connLabel(hw.spi)}
           </div>
           <div className="text-slate-500 mt-1">I2C devices: {hw.i2c === 'online' && h?.i2c?.devices?.length ? h.i2c.devices.join(', ') : 'none'}</div>
-          <div className="text-slate-400 mt-0.5">MLX90640 @0x33: {hw.thermal === 'online' ? 'detected' : 'not detected'}</div>
+          <div className="text-slate-400 mt-0.5">MLX90640 @0x33: {hw.thermal === 'online' ? 'detected' : hw.thermal === 'stale' ? 'status stale' : 'not detected'}</div>
         </div>
 
         {/* LoRa SX1278 (identity read from the radio's own registers) */}

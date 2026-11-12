@@ -231,20 +231,20 @@ if _os.path.isdir(_FRONTEND_DIST):
 # ── WebSocket fan-out limits ─────────────────────────────────────────────────
 #
 # FastAPI serves every route AND every WebSocket on ONE asyncio event loop.
-# Two consequences drive the code below:
+# The fan-out therefore must never perform a network send from the broadcaster:
 #
 #   * A client that stops reading (TCP zero-window, a sleeping laptop, a
-#     Wi-Fi power-save stall) makes `await send_json()` block forever.
-#     WS_SEND_TIMEOUT_S bounds that wait, so ONE stalled client can no
-#     longer freeze the REST API, the thermal feed and every other
-#     dashboard at the same time.
-#   * The connection list is mutated by other tasks (connect/disconnect),
-#     so broadcast() must iterate a SNAPSHOT. Mutating the list while it is
-#     being iterated raises "RuntimeError: list changed size during
-#     iteration", which aborted the whole broadcast and left the remaining
-#     clients without data - the dashboard then showed every component as
-#     disconnected until the next cycle.
+#     Wi-Fi power-save stall) must fill ONLY its own bounded queue.
+#   * One dedicated writer task per socket owns every send_json() call, so two
+#     broadcasts can never write to the same socket at the same time.
+#   * A queue that stays full is a real slow-client condition: that client is
+#     closed with a WebSocket close frame (so its browser can reconnect) and
+#     removed, without delaying any other client.
+#   * The queue is bounded and thermal frames are coalesced: a superseded
+#     thermal frame is worthless once a newer one exists.
 WS_SEND_TIMEOUT_S = 2.0
+WS_QUEUE_MAX = 32
+WS_HEARTBEAT_S = 10.0
 
 
 def _json_safe(value):
@@ -267,59 +267,237 @@ def _json_safe(value):
     return value
 
 
+class _ClientSession:
+    """One authenticated dashboard connection and its private writer queue."""
+
+    def __init__(self, manager: "ConnectionManager", websocket: WebSocket):
+        self.manager = manager
+        self.websocket = websocket
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=manager.queue_max)
+        self.writer_task: asyncio.Task | None = None
+        self.closed = False
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
+        self.messages_sent = 0
+        self.dropped_frames = 0
+        self.last_send_ok = time.monotonic()
+        self.started_at = time.monotonic()
+
+    def start(self) -> None:
+        self.writer_task = asyncio.create_task(
+            self._writer(), name="aeris-ws-writer"
+        )
+
+    async def _writer(self) -> None:
+        try:
+            while not self.closed:
+                payload = await self.queue.get()
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.send_json(payload),
+                        timeout=self.manager.send_timeout,
+                    )
+                    self.messages_sent += 1
+                    self.manager.messages_sent_total += 1
+                    self.last_send_ok = time.monotonic()
+                except asyncio.TimeoutError:
+                    await self.close(
+                        code=1013,
+                        reason=f"send timeout after {self.manager.send_timeout}s",
+                    )
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await self.close(
+                        code=1011,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    return
+                finally:
+                    self.queue.task_done()
+        except asyncio.CancelledError:
+            raise
+
+    async def close(self, code: int = 1000, reason: str = "closed") -> None:
+        """Close the socket exactly once and remove it from the fan-out."""
+        if self.closed:
+            return
+        self.closed = True
+        self.close_code = code
+        self.close_reason = reason
+        self.manager._remove(self)
+        self.manager.closed_total += 1
+        self.manager.close_codes[code] = self.manager.close_codes.get(code, 0) + 1
+        self.manager.last_close_reason = reason
+        self.manager.last_close_at = datetime.now().isoformat()
+
+        task = self.writer_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        try:
+            await asyncio.wait_for(
+                self.websocket.close(code=code, reason=reason),
+                timeout=1.0,
+            )
+        except Exception:
+            # The peer may already be gone. The registry removal above is the
+            # important part; never let a failed close crash the endpoint.
+            pass
+
+
 class ConnectionManager:
     """Fan-out of live updates to the connected dashboards.
 
-    Three properties are guaranteed:
+    Guarantees:
 
       * one failing client never interrupts the others,
       * one stalled client never blocks the shared event loop,
-      * a closed client is never left behind in the list.
+      * a closed client is removed, closed, and never left behind,
+      * exactly one writer task owns each socket (no concurrent sends).
     """
 
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
+    def __init__(self, queue_max: int | None = None, send_timeout: float | None = None):
+        self._sessions: dict[WebSocket, _ClientSession] = {}
+        self.queue_max = WS_QUEUE_MAX if queue_max is None else max(1, int(queue_max))
+        self.send_timeout = (
+            WS_SEND_TIMEOUT_S if send_timeout is None else max(0.01, float(send_timeout))
+        )
+        self.accepted_total = 0
+        self.closed_total = 0
+        self.dropped_slow_total = 0
+        self.coalesced_frames_total = 0
+        self.broadcast_calls_total = 0
+        self.messages_sent_total = 0
+        self.broadcast_enqueue_ms_max = 0.0
+        self.queue_depth_max = 0
+        self.close_codes: dict[int, int] = {}
+        self.last_close_reason: str | None = None
+        self.last_close_at: str | None = None
+        self.started_at = time.monotonic()
 
-    async def connect(self, websocket: WebSocket):
+    @property
+    def active_connections(self) -> List[WebSocket]:
+        """Snapshot of live sockets (kept for callers that inspect the list)."""
+        return [s.websocket for s in self._sessions.values() if not s.closed]
+
+    def _remove(self, session: _ClientSession) -> None:
+        if self._sessions.get(session.websocket) is session:
+            del self._sessions[session.websocket]
+
+    async def connect(self, websocket: WebSocket, initial_messages=None):
+        """Accept, register, and start the single writer for this socket."""
+        existing = self._sessions.get(websocket)
+        if existing is not None and not existing.closed:
+            return existing
+
         # Accept only if the caller has not already accepted the socket.
         if websocket.application_state != WebSocketState.CONNECTED:
             await websocket.accept()
-        self.active_connections.append(websocket)
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    def _drop(self, websocket: WebSocket, reason: str):
-        """Remove a dead client from the fan-out list.
-
-        A client that is left in the list is retried on EVERY broadcast
-        (every 2 s) and produces a failure line each time - the connection
-        leak that was visible in the journal as a repeating
-        "broadcast to a client failed" message.
-        """
-        self.disconnect(websocket)
-        print(f"[WS] client dropped: {reason}")
-
-    async def broadcast(self, message: dict):
-        # Sanitise once, outside the loop: a non-finite value must never
-        # abort the delivery to the remaining clients.
-        payload = _json_safe(message)
-        # Iterate over a SNAPSHOT - disconnect() runs from another task and
-        # mutates self.active_connections while we await.
-        for connection in list(self.active_connections):
+        session = _ClientSession(self, websocket)
+        self._sessions[websocket] = session
+        self.accepted_total += 1
+        for message in initial_messages or ():
             try:
-                await asyncio.wait_for(
-                    connection.send_json(payload), timeout=WS_SEND_TIMEOUT_S
+                session.queue.put_nowait(_json_safe(message))
+            except asyncio.QueueFull:
+                # Cannot happen for the two fixed initial frames, but keep the
+                # connect path safe if a caller supplies a larger list.
+                break
+        session.start()
+        return session
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        """Remove a socket without waiting for its writer (used by tests)."""
+        session = self._sessions.pop(websocket, None)
+        if session is not None:
+            session.closed = True
+            self.closed_total += 1
+            self.close_codes[1006] = self.close_codes.get(1006, 0) + 1
+            self.last_close_at = datetime.now().isoformat()
+
+    async def close(self, websocket: WebSocket, code: int = 1000, reason: str = "closed") -> None:
+        session = self._sessions.get(websocket)
+        if session is not None:
+            await session.close(code=code, reason=reason)
+
+    async def broadcast(self, message: dict) -> None:
+        """Enqueue a message to every client; never await a network send."""
+        payload = _json_safe(message)
+        sessions = list(self._sessions.values())
+        started = time.perf_counter()
+        for session in sessions:
+            if session.closed:
+                continue
+            try:
+                session.queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                if payload.get("type") == "thermal_frame":
+                    # A newer thermal frame is coming. Drop this one for this
+                    # client only; no other client is affected.
+                    session.dropped_frames += 1
+                    self.coalesced_frames_total += 1
+                    continue
+                # A critical message could not be queued: this client is too
+                # slow to keep. Close it so its browser reconnects promptly.
+                self.dropped_slow_total += 1
+                asyncio.create_task(
+                    session.close(code=1013, reason="slow client: queue overflow")
                 )
-            except asyncio.TimeoutError:
-                # The client stopped reading. Drop it rather than letting
-                # it stall the event loop for every other client.
-                self._drop(connection, f"send timeout after {WS_SEND_TIMEOUT_S}s")
-            except Exception as exc:
-                self._drop(connection, f"{type(exc).__name__}: {exc}")
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.broadcast_calls_total += 1
+        if elapsed_ms > self.broadcast_enqueue_ms_max:
+            self.broadcast_enqueue_ms_max = elapsed_ms
+        depth = max((s.queue.qsize() for s in self._sessions.values()), default=0)
+        if depth > self.queue_depth_max:
+            self.queue_depth_max = depth
+
+    def diagnostics(self) -> dict:
+        """Small, secret-free snapshot used by the Phase 2 stress harness."""
+        now = time.monotonic()
+        active = [
+            {
+                "age_s": round(now - session.started_at, 1),
+                "messages_sent": session.messages_sent,
+                "queue_depth": session.queue.qsize(),
+                "dropped_frames": session.dropped_frames,
+                "last_send_age_s": round(now - session.last_send_ok, 1),
+            }
+            for session in self._sessions.values()
+            if not session.closed
+        ]
+        active.sort(key=lambda item: item["age_s"], reverse=True)
+        return {
+            "active_clients": len(active),
+            "active_client_detail": active,
+            "accepted_total": self.accepted_total,
+            "closed_total": self.closed_total,
+            "closed_by_code": {str(k): v for k, v in sorted(self.close_codes.items())},
+            "dropped_slow_total": self.dropped_slow_total,
+            "coalesced_frames_total": self.coalesced_frames_total,
+            "messages_sent_total": self.messages_sent_total,
+            "queue_depth_max": self.queue_depth_max,
+            "broadcast_calls_total": self.broadcast_calls_total,
+            "broadcast_enqueue_ms_max": round(self.broadcast_enqueue_ms_max, 3),
+            "last_close_reason": self.last_close_reason,
+            "last_close_at": self.last_close_at,
+            "uptime_s": round(now - self.started_at, 1),
+            "send_timeout_s": self.send_timeout,
+            "queue_max": self.queue_max,
+        }
+
 
 manager = ConnectionManager()
+
 
 # Real telemetry state (no simulated values). Fields are null until provided by real hardware sources.
 # With only RPi4B + MLX90640 + LoRa SX1278, flight telemetry (battery/altitude/speed/heading/GPS)
@@ -393,16 +571,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close(code=WS_CLOSE_AUTH_REQUIRED, reason="auth_required")
             return
 
-        await manager.connect(websocket)
-        # Tell the client the handshake succeeded and which role it got. The
-        # client uses this to know that the live channel is really authorised.
-        await websocket.send_json({"type": "auth_ok", "role": role})
-        # Send current real telemetry state immediately on connect
-        await websocket.send_json({"type": "telemetry", **telemetry_data})
+        await manager.connect(websocket, initial_messages=[
+            # The writer task owns every send, including the initial frames.
+            {"type": "auth_ok", "role": role},
+            # Send current real telemetry state immediately on connect.
+            {"type": "telemetry", **telemetry_data},
+        ])
         while True:
             data = await websocket.receive_text()
             try:
                 message = json.loads(data)
+                if message.get("type") == "pong":
+                    # Application-level heartbeat reply. Receiving it is
+                    # enough; it keeps dead-client detection on the browser
+                    # side without ever blocking the endpoint.
+                    continue
                 if message.get("type") == "detection":
                     if role != "operator":
                         continue  # read-only viewers may not inject detections
@@ -445,15 +628,27 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # EVERY exit path removes the socket from the fan-out list. Before
-        # this, a client that left through any path other than
-        # WebSocketDisconnect stayed in the list for ever and was retried
-        # (and logged as a failure) on every single broadcast.
-        manager.disconnect(websocket)
+        # EVERY exit path removes the socket from the fan-out list and
+        # completes the close handshake. Before Phase 2, a client dropped by
+        # the broadcaster was removed but never closed, so the browser never
+        # received onclose and never reconnected.
+        try:
+            await manager.close(websocket, code=1000, reason="client closed")
+        except Exception:
+            pass
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "aeris-backend"}
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics():
+    """Secret-free WebSocket/backend counters for the Phase 2 stress tests.
+
+    Protected by AERISAuthMiddleware (LAN-only + token), like every /api route.
+    """
+    return manager.diagnostics()
 
 @app.get("/api/telemetry")
 async def get_telemetry():
@@ -1140,6 +1335,52 @@ def _read_device_health() -> dict:
         "thermal": thermal,
         "timestamp": now,
     }
+
+
+# Optional external weather refresh. The dashboard itself NEVER talks to the
+# internet: it reads the local backend cache via /api/weather. This worker is
+# the only outbound weather request in the stack, it is bounded by a 5 s
+# timeout, and an offline failure is a normal state (the cache stays honest).
+WEATHER_REFRESH_S = 1800.0
+WEATHER_LAT = 14.2515
+WEATHER_LNG = 120.731
+
+
+def _weather_refresh_loop():
+    """Refresh the local weather cache when (and only when) the WAN works."""
+    time.sleep(10.0)
+    while True:
+        if _WEATHER_AVAILABLE and _wc is not None:
+            try:
+                ok = _wc.refresh_from_open_meteo(
+                    WEATHER_LAT, WEATHER_LNG, timeout=5.0
+                )
+                print(
+                    f"[Weather] refresh {'succeeded' if ok else 'skipped (offline or fetch failed)'}"
+                )
+            except Exception as exc:
+                print(f"[Weather] refresh failed: {type(exc).__name__}: {exc}")
+        time.sleep(WEATHER_REFRESH_S)
+
+
+async def _heartbeat_loop():
+    """Send a lightweight ping so every client can detect a silent link.
+
+    The server does not require a pong and never closes an old client for
+    omitting one: that would break tabs loaded before the update. The
+    frontend watchdog is the primary detector; the writer timeout remains the
+    server-side dead-client detector.
+    """
+    while True:
+        try:
+            await asyncio.sleep(WS_HEARTBEAT_S)
+            await manager.broadcast({
+                "type": "ping",
+                "ts": datetime.now().isoformat(),
+            })
+        except Exception as exc:
+            print(f"[WS] heartbeat failed: {type(exc).__name__}: {exc}")
+            await asyncio.sleep(WS_HEARTBEAT_S)
 
 
 async def _system_broadcaster():
@@ -2049,6 +2290,7 @@ async def startup():
     globals()["_main_loop"] = asyncio.get_running_loop()
     globals()["_prev_detected"] = False
     asyncio.create_task(_system_broadcaster())
+    asyncio.create_task(_heartbeat_loop())
     _ensure_thermal_thread()
     # Keep the I2C/SPI inventory fresh in its own thread: the scan is a
     # subprocess and must never block the asyncio event loop (that would
@@ -2060,6 +2302,13 @@ async def startup():
     print("[Bus] I2C/SPI monitor started")
     # Real CPU utilisation sampler (the load average is not a percentage).
     threading.Thread(target=_cpu_monitor_loop, daemon=True, name="aeris-cpu-monitor").start()
+    # Weather is optional: the dashboard reads the local cache, and the cache
+    # is refreshed by this bounded background thread only when a WAN exists.
+    _skip_weather = (os.environ.get("AERIS_SKIP_WEATHER") or "").strip().lower() in ("1", "true", "yes")
+    if _skip_weather:
+        print("[Weather] refresh worker skipped (AERIS_SKIP_WEATHER set)")
+    else:
+        threading.Thread(target=_weather_refresh_loop, daemon=True, name="aeris-weather-refresh").start()
     # Start the ground-side LoRa receiver (real hardware; starts in real
     # RX CONTINUOUS mode on 433 MHz; safe with no drone transmitting).
     # A second instance on the same Pi would fight the primary for the radio

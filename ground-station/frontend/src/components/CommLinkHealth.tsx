@@ -22,12 +22,12 @@ export function CommLinkHealth() {
   const detected = hw.lora === 'online' && Boolean(loraHardware?.available ?? radio?.connected);
 
   // Real reception measurements - null until a packet was actually received.
-  // They are also dropped when the report is no longer current, so a stale
-  // RSSI/SNR is never presented as a live measurement.
-  const rssi = hw.linkFresh ? (radio?.rssi_dbm ?? loraRx?.last_rssi ?? null) : null;
-  const snr = hw.linkFresh ? (radio?.snr_db ?? loraRx?.last_snr ?? null) : null;
-  const rxCountRaw = hw.linkFresh ? (radio?.rx_packet_count ?? loraRx?.rx_count ?? 0) : 0;
-  const lastRx = hw.linkFresh ? (radio?.last_rx ?? loraRx?.last_rx ?? null) : null;
+  // They are also dropped when the hardware report is no longer current, so a
+  // stale RSSI/SNR is never presented as a live measurement.
+  const rssi = hw.hardwareFresh ? (radio?.rssi_dbm ?? loraRx?.last_rssi ?? null) : null;
+  const snr = hw.hardwareFresh ? (radio?.snr_db ?? loraRx?.last_snr ?? null) : null;
+  const rxCountRaw = hw.hardwareFresh ? (radio?.rx_packet_count ?? loraRx?.rx_count ?? 0) : 0;
+  const lastRx = hw.hardwareFresh ? (radio?.last_rx ?? loraRx?.last_rx ?? null) : null;
   // Per requirement: show N/A until at least one valid packet has been
   // received - a counter of 0 means "nothing heard since boot", shown as N/A.
   const rxCount = rxCountRaw > 0 ? rxCountRaw : null;
@@ -60,6 +60,10 @@ export function CommLinkHealth() {
               <span className="flex items-center gap-1 text-[10px] font-bold text-aeris">
                 <span className="w-1.5 h-1.5 rounded-full bg-aeris pulse-indicator" /> Detected
               </span>
+            ) : hw.lora === 'stale' ? (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-amber-600">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Stale
+              </span>
             ) : (
               <span className="flex items-center gap-1 text-[10px] font-bold text-slate-400">
                 <span className="w-1.5 h-1.5 rounded-full bg-slate-300" /> Disconnected
@@ -88,7 +92,9 @@ export function CommLinkHealth() {
 
           {!detected && (
             <div className="mt-2 text-[10px] text-slate-500 leading-snug">
-              {loraHardware?.reason ?? radio?.reason ?? 'No LoRa radio answered on the SPI bus.'}
+              {hw.lora === 'stale'
+                ? `Last measured state was online; no fresh hardware report${hw.reportAgeS != null ? ` for ${Math.round(hw.reportAgeS)} s` : ''}. The link is stale, not the radio.`
+                : (loraHardware?.reason ?? radio?.reason ?? 'No LoRa radio answered on the SPI bus.')}
             </div>
           )}
           {detected && rxCount === null && (

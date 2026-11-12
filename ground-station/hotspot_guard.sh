@@ -27,11 +27,24 @@ log() {
 
 mkdir -p "$(dirname "$DISABLE_MARKER")" 2>/dev/null || true
 
+# The AP interface. Power save on an AP is a known source of missed beacons
+# and multi-second client stalls on brcmfmac, so the guard re-asserts "off"
+# at runtime (the NetworkManager profile is the persistent setting).
+WIFI_IFACE="${AERIS_WIFI_IFACE:-}"
+if [ -z "$WIFI_IFACE" ]; then
+    for iface in /sys/class/net/*/wireless; do
+        [ -e "$iface" ] || continue
+        WIFI_IFACE="$(basename "$(dirname "$iface")")"
+        break
+    done
+fi
+
 # Consecutive failed activation attempts. The first few are logged in full;
 # after that the guard only reports every 12th attempt so a permanently
 # broken hotspot cannot flood the journal.
 ATTEMPTS=0
 LOG_EVERY=1
+PS_FAILS=0
 
 is_active() {
     nmcli -t -f NAME connection show --active 2>/dev/null | grep -q "^${CON_NAME}\$"
@@ -74,6 +87,26 @@ while true; do
             LOG_EVERY=$((ATTEMPTS + 1))
             if [ $((ATTEMPTS % 12)) -eq 0 ]; then
                 log "activation of '$CON_NAME' keeps failing ($ATTEMPTS attempts) - check 'nmcli con show $CON_NAME'"
+            fi
+        fi
+    fi
+
+    # Runtime backstop for the AP power-save setting. Only touch it when the
+    # AP is actually up, and only log on a transition (not every 5 s).
+    if is_active && [ -n "$WIFI_IFACE" ] && command -v iw >/dev/null 2>&1; then
+        if iw dev "$WIFI_IFACE" get power_save 2>/dev/null | grep -qi 'Power save: off'; then
+            PS_FAILS=0
+        elif iw dev "$WIFI_IFACE" set power_save off >/dev/null 2>&1; then
+            if [ "$PS_FAILS" -gt 0 ]; then
+                log "Wi-Fi power save recovered on $WIFI_IFACE"
+            else
+                log "Wi-Fi power save was ON on $WIFI_IFACE - disabled"
+            fi
+            PS_FAILS=0
+        else
+            PS_FAILS=$((PS_FAILS + 1))
+            if [ "$PS_FAILS" -eq 1 ] || [ $((PS_FAILS % 12)) -eq 0 ]; then
+                log "Wi-Fi power save is ON on $WIFI_IFACE and could not be disabled ($PS_FAILS attempts)"
             fi
         fi
     fi

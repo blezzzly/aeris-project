@@ -375,6 +375,7 @@ else
     # Create new hotspot
     if ! sudo nmcli con add type wifi ifname "$WIFI_IFACE" con-name aeris-hotspot autoconnect yes \
         wifi.mode ap wifi.ssid "$HOTSPOT_SSID" wifi.band bg wifi.channel 6 \
+        wifi.powersave 2 \
         ipv4.method shared ipv4.addresses 192.168.4.1/24 2>&1; then
         abort "Hotspot creation" "Failed to create hotspot connection. Check Wi-Fi interface: $WIFI_IFACE"
     fi
@@ -395,6 +396,25 @@ else
         warn "Hotspot started but 192.168.4.1 not found on $WIFI_IFACE"
         warn "Check: ip addr show $WIFI_IFACE"
     fi
+fi
+
+# Disable Wi-Fi power save on the AP (both paths: freshly created or kept).
+# Persist it in the profile and enforce it at runtime.
+if sudo nmcli -t -f NAME connection show 2>/dev/null | grep -q '^aeris-hotspot$'; then
+    sudo nmcli con modify aeris-hotspot 802-11-wireless.powersave 2 >/dev/null 2>&1 \
+        || warn "Could not set 802-11-wireless.powersave=2 on aeris-hotspot"
+fi
+if command -v iw >/dev/null 2>&1 && [ -n "${WIFI_IFACE:-}" ]; then
+    sudo iw dev "$WIFI_IFACE" set power_save off >/dev/null 2>&1 \
+        || warn "Could not disable Wi-Fi power save on $WIFI_IFACE"
+    POWER_SAVE_NOW="$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk -F': ' '{print $2}' | head -1)"
+    if [ "$POWER_SAVE_NOW" = "off" ]; then
+        ok "Wi-Fi power save is off on $WIFI_IFACE"
+    else
+        warn "Wi-Fi power save is still '${POWER_SAVE_NOW:-unknown}' on $WIFI_IFACE"
+    fi
+else
+    warn "'iw' is not installed - cannot verify the Wi-Fi power-save state"
 fi
 
 # ============================================================

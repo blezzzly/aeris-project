@@ -4,9 +4,9 @@ import 'leaflet/dist/leaflet.css';
 import { useAppStore } from '../stores/appStore';
 import { useGeolocation } from '../hooks/useGeolocation';
 
-type MapType = 'streets' | 'satellite';
+type MapType = 'offline' | 'streets' | 'satellite';
 
-const mapLayers: Record<MapType, { url: string; attribution: string }> = {
+const mapLayers: Record<Exclude<MapType, 'offline'>, { url: string; attribution: string }> = {
   streets: {
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     attribution: '&copy; OpenStreetMap contributors',
@@ -16,6 +16,47 @@ const mapLayers: Record<MapType, { url: string; attribution: string }> = {
     attribution: '&copy; Esri',
   },
 };
+
+/**
+ * Local fallback basemap. It never makes a network request: every tile is a
+ * canvas drawn in the browser, so the map keeps working with no WAN, DNS or
+ * CDN. Online layers are drawn on top of it; if they fail, this grid remains
+ * visible underneath.
+ */
+class OfflineGridLayer extends L.GridLayer {
+  createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
+    const tile = document.createElement('canvas');
+    const size = this.getTileSize();
+    tile.width = size.x;
+    tile.height = size.y;
+    const ctx = tile.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#eef2f6';
+      ctx.fillRect(0, 0, size.x, size.y);
+      ctx.strokeStyle = '#d5dde5';
+      ctx.lineWidth = 1;
+      const step = 64;
+      for (let x = 0; x <= size.x; x += step) {
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, size.y);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= size.y; y += step) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(size.x, y + 0.5);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px monospace';
+      ctx.fillText(`AERIS ${coords.z}/${coords.x}/${coords.y}`, 8, 18);
+    }
+    // GridLayer expects the tile to be marked ready for async tiles.
+    window.setTimeout(() => done(undefined, tile), 0);
+    return tile;
+  }
+}
 
 /**
  * Horizontal field of view of the MLX90640 camera module (BAA, wide band
@@ -89,7 +130,8 @@ export function MissionMap({ variant = 'card', mapType: controlledType, onMapTyp
   const uavMarker = useRef<L.Marker | null>(null);
   const detectionMarkers = useRef<Map<string, L.Marker>>(new Map());
   const initialized = useRef(false);
-  const [internalMapType, setInternalMapType] = useState<MapType>('streets');
+  const [internalMapType, setInternalMapType] = useState<MapType>('offline');
+  const [tileError, setTileError] = useState(false);
   const mapType = controlledType ?? internalMapType;
   const setMapType = (t: MapType) => {
     if (onMapTypeChange) onMapTypeChange(t);
@@ -200,9 +242,9 @@ export function MissionMap({ variant = 'card', mapType: controlledType, onMapTyp
       16,
     );
 
-    tileLayer.current = L.tileLayer(mapLayers.streets.url, {
-      attribution: mapLayers.streets.attribution,
-    }).addTo(map);
+    // Always add the local grid first: it is the offline basemap and the
+    // visible fallback when an online tile request fails.
+    new OfflineGridLayer({ zIndex: 0, attribution: 'AERIS local grid' }).addTo(map);
 
     const uavIcon = L.divIcon({
       className: 'custom-leaflet-marker',
@@ -228,12 +270,24 @@ export function MissionMap({ variant = 'card', mapType: controlledType, onMapTyp
   }, []);
 
   useEffect(() => {
-    if (tileLayer.current && mapInstance.current) {
+    const map = mapInstance.current;
+    if (!map) return;
+    if (tileLayer.current) {
       tileLayer.current.remove();
-      tileLayer.current = L.tileLayer(mapLayers[mapType].url, {
-        attribution: mapLayers[mapType].attribution,
-      }).addTo(mapInstance.current);
+      tileLayer.current = null;
     }
+    setTileError(false);
+    if (mapType === 'offline') return;
+    const layer = L.tileLayer(mapLayers[mapType].url, {
+      attribution: mapLayers[mapType].attribution,
+    });
+    layer.on('tileerror', () => setTileError(true));
+    layer.addTo(map);
+    tileLayer.current = layer;
+    return () => {
+      layer.remove();
+      if (tileLayer.current === layer) tileLayer.current = null;
+    };
   }, [mapType]);
 
   // ── Live UAV marker + radar orientation ────────────────────────────────
@@ -329,6 +383,7 @@ export function MissionMap({ variant = 'card', mapType: controlledType, onMapTyp
   }, [alertAcknowledged]);
 
   const mapTypes: { id: MapType; label: string }[] = [
+    { id: 'offline', label: 'Offline' },
     { id: 'streets', label: 'Streets' },
     { id: 'satellite', label: 'Satellite' },
   ];
@@ -370,6 +425,18 @@ export function MissionMap({ variant = 'card', mapType: controlledType, onMapTyp
       )}
 
       <div ref={mapRef} className="absolute inset-0 z-0 rounded-xl overflow-hidden" />
+
+      {(mapType === 'offline' || tileError) && (
+        <div
+          className={`absolute left-4 z-10 bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-md shadow-sm border border-slate-200 text-[10px] font-medium text-slate-600 ${
+            variant === 'card' ? 'top-16' : 'top-4'
+          }`}
+        >
+          {tileError && mapType !== 'offline'
+            ? 'Map tiles unavailable offline — showing the local grid'
+            : 'Offline local grid — no external map tiles requested'}
+        </div>
+      )}
 
       <div className="hidden sm:flex absolute bottom-4 right-4 bg-white/90 backdrop-blur-sm p-3 rounded-lg border border-slate-200 shadow-sm text-[10px] text-slate-600 flex-col gap-2 z-10 pointer-events-none">
         <div className="flex items-center gap-2">

@@ -1,11 +1,40 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
+import { getApiBase } from '../lib/api';
+import { AUTH_CHANGED_EVENT } from './useWebSocket';
 
-// Live weather from Open-Meteo (free, no API key) for the mission area (Maragondon, Cavite).
-// Auto-updates every 5 minutes; never uses hardcoded/simulated values.
-const LAT = 14.2515;
-const LNG = 120.731;
-const URL = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LNG}&current=temperature_2m,weather_code,wind_speed_10m&timezone=Asia%2FManila`;
+/**
+ * Weather for the mission area (Maragondon, Cavite).
+ *
+ * The browser NEVER calls an external service: it reads the backend's local
+ * cache through /api/weather. The backend may refresh that cache when a WAN
+ * exists, but AERIS works fully offline without one.
+ *
+ * Cached-but-old data is never presented as a live reading: the panel shows
+ * "Unavailable / offline" and the age of the cache instead.
+ */
+const REFRESH_MS = 5 * 60 * 1000;
+
+interface WeatherPayload {
+  status?: string;
+  data?: {
+    current?: {
+      temperature_2m?: number;
+      weather_code?: number;
+      time?: string;
+    };
+    temperature?: number;
+    temperature_2m?: number;
+    weather_code?: number;
+    code?: number;
+    time?: string;
+  } | null;
+  is_live?: boolean;
+  age_seconds?: number | null;
+  fetched_at?: number | null;
+  source?: string | null;
+  reason?: string | null;
+}
 
 function wmoToCondition(code: number): string {
   if (code === 0) return 'Clear';
@@ -23,41 +52,87 @@ function wmoToCondition(code: number): string {
   return 'Unknown';
 }
 
+function ageLabel(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return 'age unknown';
+  const minutes = Math.round(seconds / 60);
+  if (minutes <= 0) return 'just now';
+  if (minutes < 60) return `${minutes} min old`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} h old`;
+}
+
 export function useLiveWeather() {
   useEffect(() => {
     let cancelled = false;
+
     const fetchWeather = async () => {
       try {
-        const res = await fetch(URL);
+        const res = await fetch(`${getApiBase()}/api/weather`, {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('aeris_token') ?? ''}`,
+          },
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const temp = data?.current?.temperature_2m;
-        const code = data?.current?.weather_code;
-        if (typeof temp !== 'number' || typeof code !== 'number') throw new Error('Missing data');
-        if (!cancelled) {
+        const payload = (await res.json()) as WeatherPayload;
+        const data = payload?.data;
+        const current = data?.current;
+        const temp = current?.temperature_2m ?? data?.temperature ?? data?.temperature_2m;
+        const code = current?.weather_code ?? data?.weather_code ?? data?.code;
+        const observedAt =
+          current?.time ??
+          data?.time ??
+          (typeof payload.fetched_at === 'number'
+            ? new Date(payload.fetched_at * 1000).toISOString()
+            : null);
+        const hasReading = typeof temp === 'number' && typeof code === 'number';
+        const live = payload?.is_live === true && hasReading;
+
+        if (cancelled) return;
+        if (live) {
           useAppStore.getState().updateEnvironment({
-            temperature: Math.round(temp * 10) / 10,
-            condition: wmoToCondition(code),
-            updatedAt: data.current.time ?? new Date().toISOString(),
-            source: 'Open-Meteo (live)',
+            temperature: Math.round((temp as number) * 10) / 10,
+            condition: wmoToCondition(code as number),
+            updatedAt: observedAt,
+            source: 'Open-Meteo (local cache)',
+          });
+        } else if (hasReading) {
+          // Cached, but not fresh: do not display it as a current reading.
+          useAppStore.getState().updateEnvironment({
+            temperature: null,
+            condition: `Offline — cached ${ageLabel(payload.age_seconds)}`,
+            updatedAt: observedAt,
+            source: 'Local weather cache (stale)',
+          });
+        } else {
+          useAppStore.getState().updateEnvironment({
+            temperature: null,
+            condition: 'Unavailable (offline)',
+            updatedAt: null,
+            source: 'Local weather cache',
           });
         }
       } catch {
         if (!cancelled) {
           useAppStore.getState().updateEnvironment({
             temperature: null,
-            condition: 'Unavailable',
+            condition: 'Unavailable (offline)',
             updatedAt: null,
-            source: 'Open-Meteo (live)',
+            source: 'Local weather cache',
           });
         }
       }
     };
+
     fetchWeather();
-    const id = setInterval(fetchWeather, 5 * 60 * 1000);
+    const id = setInterval(fetchWeather, REFRESH_MS);
+    // A token change means the request may start succeeding (or fail): retry
+    // immediately instead of waiting for the next 5-minute tick.
+    const onAuthChanged = () => { void fetchWeather(); };
+    window.addEventListener(AUTH_CHANGED_EVENT, onAuthChanged);
     return () => {
       cancelled = true;
       clearInterval(id);
+      window.removeEventListener(AUTH_CHANGED_EVENT, onAuthChanged);
     };
   }, []);
 }

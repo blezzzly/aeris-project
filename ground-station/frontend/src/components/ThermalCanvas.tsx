@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useHardwareStatus } from '../hooks/useHardwareStatus';
+import { FRAME_STALE_MS } from '../lib/hardwareStatus';
 
 export type ThermalPalette = 'iron' | 'inferno' | 'rainbow' | 'grayscale';
 
@@ -88,7 +89,6 @@ export function paletteGradient(palette: ThermalPalette): string {
 
 const COLS = 32;
 const ROWS = 24;
-const STALE_MS = 5000; // no fresh frame for 5 s -> treat as offline
 const MIN_SPAN_C = 2;  // never auto-range tighter than 2 °C (avoids noise chase)
 
 interface ThermalCanvasProps {
@@ -126,14 +126,48 @@ export function ThermalCanvas({ palette = 'iron', className = '' }: ThermalCanva
 
   const matrix = frame?.matrix ?? null;
   const frameTime = frame?.receivedAt ?? 0;
+  const frameAgeMs = frameTime > 0 ? Date.now() - frameTime : null;
+  const frameFresh = frameAgeMs != null && frameAgeMs >= 0 && frameAgeMs <= FRAME_STALE_MS;
   // A frame only counts as live while it is recent AND the sensor is still
   // reported as answering by the backend.
   const live =
     hw.thermal === 'online' &&
     Boolean(thermal?.ok) &&
     matrix !== null &&
-    frameTime > 0 &&
-    Date.now() - frameTime < STALE_MS;
+    frameFresh;
+
+  // The overlay must never turn a transport delay into a hardware failure:
+  // "offline" is only shown when the backend actually measured the sensor
+  // offline. A late frame on a live sensor is "frame delayed"; a stale report
+  // is "status stale".
+  let overlayTitle: string | null = null;
+  let overlayDetail = '';
+  if (!live) {
+    if (hw.thermal === 'offline') {
+      overlayTitle = 'Thermal sensor offline';
+      overlayDetail =
+        thermal?.error ??
+        hw.devices?.mlx90640?.reason ??
+        'The backend reports the MLX90640 as offline.';
+    } else if (hw.thermal === 'stale') {
+      overlayTitle = 'Thermal status stale';
+      overlayDetail = `The backend last reported this sensor online${
+        hw.reportAgeS != null ? ` ${Math.round(hw.reportAgeS)} s ago` : ' earlier'
+      }; the live link is not delivering fresh hardware reports.`;
+    } else if (hw.thermal === 'unknown') {
+      overlayTitle = 'Waiting for thermal status';
+      overlayDetail = 'No hardware report has arrived from the ground station yet.';
+    } else if (!frameFresh) {
+      overlayTitle = frameAgeMs != null ? 'Thermal frame delayed' : 'Waiting for the first frame';
+      overlayDetail =
+        frameAgeMs != null
+          ? `Sensor online — the last frame arrived ${(frameAgeMs / 1000).toFixed(1)} s ago. Waiting for the next frame over the live link.`
+          : 'Sensor online — no thermal frame has arrived yet.';
+    } else {
+      overlayTitle = 'Thermal frame unavailable';
+      overlayDetail = thermal?.error ?? 'The sensor is online but no valid frame is available.';
+    }
+  }
 
   // ── Paint the latest frame ─────────────────────────────────────────────
   const paint = () => {
@@ -297,12 +331,12 @@ export function ThermalCanvas({ palette = 'iron', className = '' }: ThermalCanva
     <div ref={wrapRef} className={`relative h-full w-full overflow-hidden bg-white ${className}`}>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-label="MLX90640 live thermal image" />
 
-      {!live && (
+      {!live && overlayTitle && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-white text-center px-4">
           <div className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">MLX90640 Thermal</div>
-          <div className="text-slate-700 text-sm font-semibold">Thermal sensor offline</div>
+          <div className="text-slate-700 text-sm font-semibold">{overlayTitle}</div>
           <div className="text-slate-500 text-[11px] leading-snug max-w-[280px]">
-            {thermal?.error ?? hw.devices?.mlx90640?.reason ?? 'Waiting for the first frame from the sensor…'}
+            {overlayDetail}
           </div>
         </div>
       )}

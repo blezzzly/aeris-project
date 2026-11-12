@@ -16,9 +16,9 @@ export function RpiSystemHealth() {
   const na = (v: number | null | undefined, suffix = '') =>
     v == null || !Number.isFinite(v) ? 'N/A' : `${v}${suffix}`;
 
-  // Without a fresh report the last measurements are out of date - they must
-  // not be presented as current readings.
-  const s = hw.linkFresh ? system : null;
+  // Without a fresh hardware report the last measurements are out of date -
+  // they must not be presented as current readings.
+  const s = hw.hardwareFresh ? system : null;
 
   const uptime =
     s?.uptime_s != null

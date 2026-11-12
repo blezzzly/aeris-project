@@ -89,18 +89,18 @@ export function Sidebar() {
 
   // ── Real hardware states ────────────────────────────────────────────────
   // Every state comes from the backend's real measurements (see
-  // useHardwareStatus): the Pi is "online" while the station keeps
-  // delivering a fresh report, and each device is only "connected" when it
-  // actually answered recently.
+  // useHardwareStatus). A device is only "Disconnected" when the backend
+  // measured it offline; a previously-online device whose report stopped
+  // arriving is shown as "Stale" (the link is the problem, not the hardware).
   const hw = useHardwareStatus();
 
   // System health is derived from the real measurements of the Pi. When the
-  // live link is down the last measurements are no longer current, so the
-  // state is reported as unknown instead of a stale "Normal".
+  // hardware report is no longer fresh the last measurements are not current,
+  // so the state is reported as unknown instead of a stale "Normal".
   const CPU_WARN_C = 80;
   const RAM_WARN_PCT = 90;
   const systemHealth: RowState =
-    !hw.linkFresh || system == null
+    !hw.hardwareFresh || system == null
       ? 'unknown'
       : (system.cpu_temp_c != null && system.cpu_temp_c >= CPU_WARN_C) ||
           (system.ram_usage_pct != null && system.ram_usage_pct >= RAM_WARN_PCT)
@@ -180,7 +180,7 @@ export function Sidebar() {
                 label="Raspberry Pi 4B"
                 state={rowStateFor(hw.rpi)}
                 onlineText="Online"
-                offlineText="Offline"
+                offlineText={hw.rpi === 'stale' ? 'Stale' : 'Offline'}
               />
               <StatusRow
                 label="MLX90640"
@@ -213,7 +213,7 @@ export function Sidebar() {
               <IconFill name={getEnvironmentIcon(environment.condition) as any} className="text-2xl text-yellow-500" />
               <div>
                 <div className="text-lg font-bold text-slate-800 leading-none">
-                  {environment.temperature}°C
+                  {environment.temperature != null ? `${environment.temperature}°C` : '—'}
                 </div>
                 <div className="text-xs text-slate-500">{environment.condition}</div>
               </div>

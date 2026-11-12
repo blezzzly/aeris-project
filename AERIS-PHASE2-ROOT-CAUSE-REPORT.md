@@ -1,13 +1,14 @@
 # AERIS — PHASE 2 ROOT-CAUSE REPORT AND IMPLEMENTATION PROPOSAL
 
 **System:** AERIS Ground Station · Raspberry Pi 4 Model B Rev 1.2 · Debian GNU/Linux 13 (Trixie) · kernel 6.18.60+rpt-rpi-v8  
-**Branch:** `feature/phase1-reliability` @ `c4b26eb` (clean working tree)  
-**Baseline:** `main` / `origin/main` @ `4524cd3` — untouched  
+**Phase 1 baseline:** `c4b26eb`; the earlier diagnosis commit `ed9ddbd` is preserved on the branch.  
+**Phase 2 branch:** `feature/phase2-offline-reliability` (created from the approved Phase 1 head; `main` / `origin/main` @ `4524cd3` untouched)  
 **Runtime:** `aeris-backend` PID **55638**, active since **2026-11-13 01:58:32 PST**, `NRestarts=0`  
 **Diagnostic window:** 2026-11-13 02:08 → 03:23 PST  
-**Report status:** **DIAGNOSIS COMPLETE — APPROVAL REQUIRED — NO IMPLEMENTATION STARTED**
+**Report status:** **APPROVED FOR IMPLEMENTATION — implementation in progress**  
+**Companion evidence:** `AERIS-PHASE2-ROOT-CAUSE.md` (earlier diagnosis, preserved; its 1 695-sample hardware stability run and one-stalled-client measurements are incorporated below).
 
-> **Bottom line:** the Raspberry Pi hardware is not disconnecting and the backend is not restarting. The remote dashboard flips every device to OFFLINE because a **client-link problem** is incorrectly rendered as a **hardware failure**. The chain is: Wi-Fi link stalls/drops (with AP power-save enabled as a confirmed physical-layer defect) → Serialized WebSocket fan-out blocks for 2 s per stalled client (measured **16.02 s with 8 stalled clients**) → the 15 s hardware-freshness rule marks every device OFFLINE → the dropped socket is never closed, so the browser never reconnects → no heartbeat/watchdog leaves a half-open link stuck. The hardware layer remained independent and healthy throughout.
+> **Bottom line:** the Raspberry Pi hardware is not disconnecting and the backend is not restarting. The remote dashboard flips every device to OFFLINE because a **transport/fan-out problem** is incorrectly rendered as a **hardware failure**. A slow or stalled client — often triggered by a Wi-Fi link stall, with AP power-save enabled as a confirmed physical-layer defect — blocks the serialized WebSocket fan-out for the full 2 s timeout per client (measured **16.02 s with 8 stalled clients**, and **137 drop log lines in 45 s with just one stalled client**). The 15 s hardware-freshness rule then marks every device OFFLINE. The dropped socket is never closed, so the browser never reconnects, and no heartbeat/watchdog clears the half-open link. The hardware layer remained independent and healthy throughout.
 
 ---
 
@@ -22,7 +23,7 @@
 | Is this a DHCP problem? | **No.** The laptop retained `192.168.4.57`; the dnsmasq lease is 3600 s and stable. |
 | Is this a thermal/CPU throttling problem? | **No.** CPU was 74–75.4 °C, `vcgencmd get_throttled` = `0x0`, no throttling. Load was high (≈5–6) because the local desktop/Firefox/agent workload is running, but the backend answered promptly and the hardware did not fault. |
 | Is this a duplicate-polling problem? | **No.** The backend is the single owner of hardware acquisition; clients receive shared broadcasts. There is no per-client sensor polling. |
-| Is the AP configuration itself healthy? | Mostly, but **Wi-Fi power save is ON** on `wlan0`, while the NetworkManager profile leaves it at `0 (default)`. This is a confirmed misconfiguration and the leading physical-layer suspect for the AP-STA disconnects. |
+| Is the AP configuration itself healthy? | Mostly, but **Wi-Fi power save is ON** on `wlan0`, while the NetworkManager profile leaves it at `0 (default)`. This is a confirmed misconfiguration and a link-level trigger/amplifier, not the primary cause of the dashboard flapping. |
 
 ### The two proven software defects
 
@@ -229,6 +230,17 @@ $ ping -c 40 -i 0.2 -W 1 192.168.4.57
 
 The AP is on a locally clear channel: channel 6 had no competing SSID in the scan; channel 1 was congested (`fh_ssid1`, `KESTREL PHOS28`). Channel congestion is therefore not the explanation.
 
+The laptop's station dump during the failure window showed a weak return path and client power-save:
+
+```text
+tx packets: 3371    tx bytes: 3325009    tx failed: 718   (~21% failed)
+tx bitrate: 43.3 MBit/s   rx bitrate: 2.0 MBit/s   DTIM period: 2
+```
+
+That is a trigger condition for a send stall, not a hardware fault. The AP's
+own power-save setting is a confirmed misconfiguration that can worsen the
+AP side of the same path; the software fan-out must remain correct regardless.
+
 **Important limitation:** the available logs prove the AP-STA deauth events, and they prove power save is enabled, but they do not contain the driver's deauth reason code. The exact cause of each individual deauth is not proven. Power save in AP mode is a known source of missed beacons/buffered-frame stalls on `brcmfmac`, and it is a confirmed misconfiguration that must be removed; the software fan-out defect is independently proven and is sufficient to produce the OFFLINE flapping even without a deauth.
 
 ### 4.3 WebSocket fan-out evidence
@@ -258,6 +270,37 @@ def _drop(self, websocket, reason):
 ```
 
 There is no `websocket.close()`.
+
+The thermal capture thread starts a new broadcast for every frame via
+`asyncio.run_coroutine_threadsafe(manager.broadcast(...), loop)` **without
+awaiting the previous broadcast**. Several broadcasts can therefore be in
+flight at once, each holding its own pre-removal snapshot of the client list.
+A client that reconnects lands at the end of that list, behind any stalled
+client, and is starved.
+
+The companion diagnosis measured the single-client failure directly:
+
+| Measurement | Result | Healthy expectation |
+|---|---:|---:|
+| `[WS] client dropped` lines in a 45 s window with **one** stalled client | **137** | 1 |
+| Frames received by a healthy client **behind** the stalled client | **12 in 90 s** | ≈230 |
+| Frames received by a healthy client **in front of** the stalled client | 149 in 60 s (max gap 0.55 s) | ≈150 |
+
+This is the critical finding: **one** stalled client is enough to starve
+clients behind it and to generate a drop-log storm, without any hardware
+fault.
+
+The laptop's station dump at the time of the failure also showed a weak
+return path and client power-save:
+
+```text
+tx packets: 3371    tx bytes: 3325009    tx failed: 718   (~21% failed)
+tx bitrate: 43.3 MBit/s   rx bitrate: 2.0 MBit/s   DTIM period: 2
+```
+
+The trigger is therefore a normal Wi-Fi/client condition (DTIM power-save,
+background-tab throttling, roam, or short link loss), not a hardware failure.
+The fan-out turns that trigger into a global outage.
 
 Production counter examples (not a complete list):
 
@@ -308,7 +351,7 @@ Reproduction scripts (temporary, outside the repository):
 - `/tmp/opencode/probe_blocking.py`
 - `/tmp/opencode/probe_8stalled.py`
 
-**Why this produces visible flapping:** the frontend treats a hardware report older than **15 s** as not fresh. One broadcast with 8 stalled clients already takes **16.02 s**. The thermal feed runs at up to 4 frames per second (2 or 1 Hz if the I2C bus is slower), and the system broadcast every 2 s; when several broadcasts overlap, the same client can be written concurrently and the system broadcaster's next cycle is delayed. A remote client that has a brief Wi-Fi stall can therefore cause every dashboard to show OFFLINE even though the Pi measured everything as online.
+**Why this produces visible flapping:** the frontend treats a hardware report older than **15 s** as not fresh. One broadcast with 8 stalled clients already takes **16.02 s**. The thermal feed is configured for up to 4 Hz but measured at roughly **2.5 frames/s** in the companion run (2 Hz sensor refresh with jitter), and the system broadcast runs every 2 s; when several broadcasts overlap, the same client can be written concurrently and the system broadcaster's next cycle is delayed. A remote client that has a brief Wi-Fi stall can therefore cause every dashboard to show OFFLINE even though the Pi measured everything as online.
 
 ### 4.4 Frontend conflation evidence
 
@@ -336,6 +379,20 @@ This is the direct UI cause of the ONLINE→OFFLINE→ONLINE display. The backen
 `App.tsx` only shows the link-warning banner when `!wsConnected`. Because the dropped socket is never closed, `wsConnected` stays `true` while the hardware data goes stale. The user sees no "link lost" banner, only red hardware indicators.
 
 `useLinkState()` exists but is unused. `clearHardwareData()` exists in the store but is never called; the corruption happens through `linkFresh`, not through clearing.
+
+A second, independent transport-as-hardware conflation exists in
+`ThermalCanvas.tsx`:
+
+```ts
+const STALE_MS = 5000; // no fresh frame for 5 s -> treat as offline
+...
+<div className="text-slate-700 text-sm font-semibold">Thermal sensor offline</div>
+```
+
+A frame delayed behind a stalled WebSocket client for 5 s therefore displays
+"Thermal sensor offline" even though the backend still reports `mlx90640:
+online` and the capture thread is still `running`. This is the same mistake at
+the component level and must be fixed together with `useHardwareStatus()`.
 
 ### 4.5 Offline dependency audit
 
@@ -373,17 +430,21 @@ Phase 2 will preserve token auth, LAN-only API access, and the existing close co
 ### Primary causal chain
 
 ```text
-AP power-save enabled / client Wi-Fi stall or deauth
+Normal Wi-Fi/client trigger: DTIM power-save, background-tab throttling,
+roam, short link loss, or an AP-side power-save stall
         │
         ▼
-TCP send stalls or half-open connection
+One client stops reading; TCP send buffer fills
         │
         ▼
 ConnectionManager.broadcast() awaits each client serially (2 s each)
+and the thermal capture starts overlapping broadcasts without awaiting
         │
+        ├── one stalled client: 137 drop log lines in 45 s; healthy client
+        │   behind it received 12/230 frames (companion measurement)
         ├── 3 stalled clients = 6.01 s measured
         ├── 8 stalled clients = 16.02 s measured (> 15 s freshness)
-        └── overlapping thermal broadcasts can write the same socket concurrently
+        └── overlapping broadcasts can write the same socket concurrently
         │
         ▼
 No fresh "system" frame reaches the browser for > 15 s
@@ -404,6 +465,11 @@ Browser never receives onclose → never reconnects
 No heartbeat/watchdog → half-open link can persist
 ```
 
+The **primary cause is the fan-out/state design**, not the Wi-Fi link and not
+the hardware. The AP power-save setting is a confirmed trigger/amplifier: it
+makes link stalls more likely, but the system must remain correct when a
+client stalls for any reason.
+
 ### What the root cause is **not**
 
 - Not a hardware disconnect: hardware state never changed in the journal; PID unchanged; zero thermal/LoRa reinit.
@@ -421,11 +487,11 @@ The local dashboard does not cross the AP. The remote dashboard does. The remote
 
 ## 6. PROPOSED IMPLEMENTATION
 
-**No implementation has started. The items below require explicit approval.**
+**Approved by the user; implementation is in progress. Privileged deployment remains gated on the user's sudo access.**
 
 ### 6.1 Branch and change management
 
-1. Create `feature/phase2-offline-reliability` from `c4b26eb` (the current Phase 1 HEAD). Do **not** touch `main` or `origin/main`.
+1. `feature/phase2-offline-reliability` has been created from the approved Phase 1 head (`ed9ddbd`, which includes `c4b26eb` and the preserved diagnosis). Do **not** touch `main` or `origin/main`.
 2. Keep the branch history in small, reviewable commits:
    - `P2-1`: backend WebSocket hub, heartbeat, close semantics, regression tests.
    - `P2-2`: frontend link/device-state separation, silence watchdog, reconnect tests.
@@ -540,7 +606,9 @@ Do not force device indicators to `'offline'` when the link is stale.
 **Watchdog and reconnect**
 
 - Add the 20 s silence watchdog and 10 s connect timeout to `useWebSocket.ts`.
-- Reset the reconnect attempt counter only after `auth_ok`.
+- Reset the reconnect attempt counter after `auth_ok` and after a socket has been
+  healthy for at least 10 s; cap the backoff at 3 s so a flapping link does not
+  stay at an 8 s delay.
 - On tab visibility change, immediately re-check the socket and reconnect if needed.
 - Preserve the existing auth handshake and close-code handling (4401, 1008).
 - The token remains in `localStorage` and in the first auth frame; no URL token.
@@ -563,6 +631,7 @@ Do not force device indicators to `'offline'` when the link is stale.
 - `ground-station/frontend/src/components/CommLinkHealth.tsx`
 - `ground-station/frontend/src/components/LiveFeed.tsx`
 - `ground-station/frontend/src/components/ThermalAnalytics.tsx`
+- `ground-station/frontend/src/components/ThermalCanvas.tsx`
 
 ### 6.4 AP: disable Wi-Fi power save persistently
 
@@ -685,7 +754,8 @@ Create a repeatable harness (stdlib + already-installed `websockets`) that recor
 | 1 client, 30 min | synthetic + real browser | continuous system reports; no UI flapping |
 | 2 clients, 30 min | two browsers/devices | both receive same data; no duplicate hardware polling |
 | 3+ clients, 30 min | laptop + phone + tablet | all clients live; backend CPU stable |
-| Slow client | inject a non-reading client | healthy clients unaffected; slow client closed |
+| Slow client | inject one non-reading client for 90 s | healthy client retains ≥98 % of frames; ≤2 drop-log lines |
+| Slow clients | inject three non-reading clients | healthy client retains ≥98 % of frames |
 | Browser refresh ×10 | reload dashboard repeatedly | reconnect within backoff; no sensor restart |
 | Wi-Fi disconnect/reconnect | disable/enable client Wi-Fi | dashboard reconnects; device states remain last measured/stale, not false offline |
 | Tab idle/return | hide tab 5–10 min, return | watchdog or visibility check reconnects |
@@ -791,6 +861,8 @@ No database schema or sensor-calibration change is planned. Detection data remai
 | `ground-station/frontend/src/App.tsx` | Link banner only when `!wsConnected` |
 | `ground-station/frontend/src/components/HardwareStatus.tsx` | Device labels and REST fallback |
 | `ground-station/frontend/src/components/Sidebar.tsx` | `!hw.linkFresh` → `unknown` |
+| `ground-station/frontend/src/components/ThermalCanvas.tsx` | 5 s frame age → "Thermal sensor offline" overlay |
+| `AERIS-PHASE2-ROOT-CAUSE.md` | Companion diagnosis: 1 695 hardware samples, one-stalled-client starvation evidence |
 | `aeris.sh` | Hotspot creation at lines 1208–1227; no power-save disable |
 | `setup_aeris.sh` | Alternate hotspot creation at lines 366–395; no power-save disable |
 | `ground-station/hotspot_guard.sh` | AP liveness loop; no power-save enforcement |

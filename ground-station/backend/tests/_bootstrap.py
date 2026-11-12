@@ -40,6 +40,9 @@ os.environ["AERIS_VIEWER_TOKEN"] = TEST_VIEWER_TOKEN
 # Keep the backend from claiming the real radio.
 os.environ.setdefault("AERIS_SKIP_LORA_RX", "1")
 
+# Tests must never make an outbound weather request.
+os.environ.setdefault("AERIS_SKIP_WEATHER", "1")
+
 # ── Redirect every SQLite connection to a throw-away file ───────────────────
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="aeris-tests-")
 _real_connect = sqlite3.connect

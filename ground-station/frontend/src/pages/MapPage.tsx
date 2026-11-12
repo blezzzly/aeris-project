@@ -1,15 +1,16 @@
 import { useState } from 'react';
 import { MissionMap } from '../components/MissionMap';
 
-type MapType = 'streets' | 'satellite';
+type MapType = 'offline' | 'streets' | 'satellite';
 
 const mapTypes: { id: MapType; label: string }[] = [
+  { id: 'offline', label: 'Offline' },
   { id: 'streets', label: 'Streets' },
   { id: 'satellite', label: 'Satellite' },
 ];
 
 export function MapPage() {
-  const [mapType, setMapType] = useState<MapType>('streets');
+  const [mapType, setMapType] = useState<MapType>('offline');
 
   return (
     <div className="h-full flex flex-col">

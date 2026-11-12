@@ -9,9 +9,10 @@ import { MapPage } from './pages/MapPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { useAppStore } from './stores/appStore';
 import { useWebSocket, notifyAuthChanged } from './hooks/useWebSocket';
+import { useHardwareStatus, useLinkState } from './hooks/useHardwareStatus';
 
 function App() {
-  const { activeTab, modalOpen, linkState } = useAppStore();
+  const { activeTab, modalOpen } = useAppStore();
   const [loginToken, setLoginToken] = useState('');
   const [showLogin, setShowLogin] = useState<boolean>(() => !localStorage.getItem('aeris_token'));
 
@@ -33,8 +34,42 @@ function App() {
   }, []);
 
   // The connection state comes from the socket itself (useWebSocket tracks the
-  // real open/close events), so it can never drift out of sync.
+  // real open/close events), so it can never drift out of sync. The banner
+  // additionally distinguishes a stale transport from stale hardware data:
+  // neither is allowed to look like a hardware failure.
   const { connected: wsConnected } = useWebSocket();
+  const linkState = useLinkState();
+  const hw = useHardwareStatus();
+
+  const linkAgeLabel = hw.linkAgeS != null ? `${Math.round(hw.linkAgeS)}s` : null;
+  const reportAgeLabel = hw.reportAgeS != null ? `${Math.round(hw.reportAgeS)}s` : null;
+  const banner = (() => {
+    if (!wsConnected) {
+      if (linkState === 'connecting') {
+        return {
+          tone: 'warning' as const,
+          text: 'CONNECTING TO THE GROUND STATION — opening the live hardware channel…',
+        };
+      }
+      return {
+        tone: 'danger' as const,
+        text: `LIVE LINK OFFLINE — showing the last measured device state${reportAgeLabel ? ` from ${reportAgeLabel} ago` : ''}; reconnecting…`,
+      };
+    }
+    if (linkState === 'stale' || linkState === 'offline') {
+      return {
+        tone: 'warning' as const,
+        text: `LIVE LINK STALE — no message for ${linkAgeLabel ?? 'several seconds'}; showing the last measured device state.`,
+      };
+    }
+    if (!hw.hardwareFresh) {
+      return {
+        tone: 'warning' as const,
+        text: `LIVE LINK ACTIVE — no fresh hardware report${reportAgeLabel ? ` (${reportAgeLabel})` : ''}; showing the last measured device state.`,
+      };
+    }
+    return null;
+  })();
 
   useEffect(() => {
     if (wsConnected) return;
@@ -91,11 +126,13 @@ function App() {
       <Sidebar />
       <main className="flex-1 flex flex-col relative overflow-hidden bg-slate-100">
         <Header />
-        {!wsConnected && (
-          <div className="bg-amber-500 text-white text-xs font-semibold px-4 py-1.5 flex items-center gap-2">
-            {linkState === 'connecting'
-              ? 'CONNECTING TO THE GROUND STATION — opening the live hardware channel…'
-              : 'LIVE LINK OFFLINE — telemetry is not being updated (values shown are the last known readings)'}
+        {banner && (
+          <div
+            className={`${
+              banner.tone === 'danger' ? 'bg-red-500' : 'bg-amber-500'
+            } text-white text-xs font-semibold px-4 py-1.5 flex items-center gap-2`}
+          >
+            {banner.text}
           </div>
         )}
         <div className="flex-1 overflow-y-auto lg:overflow-hidden p-4 lg:p-6 scroll-smooth">

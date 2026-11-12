@@ -1218,6 +1218,7 @@ if ! nmcli -t -f NAME connection show 2>/dev/null | grep -q "^${HOTSPOT_CON}$"; 
     fi
     nmcli con add type wifi ifname "$WIFI_IFACE" con-name "$HOTSPOT_CON" \
         autoconnect yes wifi.mode ap wifi.ssid "$HOTSPOT_SSID" wifi.band bg wifi.channel 6 \
+        wifi.powersave 2 \
         ipv4.method shared ipv4.addresses "${HOTSPOT_IP}/24" \
         >/dev/null 2>&1 \
         || die "Could not create the hotspot connection '$HOTSPOT_CON'." \
@@ -1238,6 +1239,18 @@ else
     fi
 fi
 
+# Disable Wi-Fi power save on the AP. Power save on an access point is a
+# known source of missed beacons and multi-second buffered-frame stalls on
+# brcmfmac, which the client sees as a link drop. This is the persistent
+# NetworkManager setting; the runtime 'iw' command below applies it at once
+# (and hotspot_guard.sh re-asserts it every few seconds).
+nmcli con modify "$HOTSPOT_CON" 802-11-wireless.powersave 2 >/dev/null 2>&1 \
+    || warn "Could not set 802-11-wireless.powersave=2 on '$HOTSPOT_CON'"
+if command -v iw >/dev/null 2>&1; then
+    iw dev "$WIFI_IFACE" set power_save off >/dev/null 2>&1 \
+        || warn "Could not disable Wi-Fi power save on $WIFI_IFACE"
+fi
+
 # Bring it up.
 if ! nmcli -t -f NAME connection show --active 2>/dev/null | grep -q "^${HOTSPOT_CON}$"; then
     info "Activating the hotspot..."
@@ -1249,6 +1262,20 @@ if nmcli -t -f NAME connection show --active 2>/dev/null | grep -q "^${HOTSPOT_C
     ok "Hotspot '$HOTSPOT_CON' is active (SSID: $HOTSPOT_SSID)"
 else
     warn "The hotspot is not active - the guard service will retry every few seconds"
+fi
+
+# Runtime verification: the profile may say "disable" while the driver still
+# has power save on. Re-assert it and report the measured state.
+if command -v iw >/dev/null 2>&1; then
+    iw dev "$WIFI_IFACE" set power_save off >/dev/null 2>&1 || true
+    POWER_SAVE_NOW="$(iw dev "$WIFI_IFACE" get power_save 2>/dev/null | awk -F': ' '{print $2}' | head -1)"
+    if [ "$POWER_SAVE_NOW" = "off" ]; then
+        ok "Wi-Fi power save is off on $WIFI_IFACE"
+    else
+        warn "Wi-Fi power save is still '${POWER_SAVE_NOW:-unknown}' on $WIFI_IFACE - the hotspot guard will retry"
+    fi
+else
+    warn "'iw' is not installed - cannot verify the Wi-Fi power-save state"
 fi
 
 systemctl restart aeris-hotspot-guard >/dev/null 2>&1 || true

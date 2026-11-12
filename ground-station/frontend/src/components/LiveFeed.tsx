@@ -19,8 +19,10 @@ export function LiveFeed() {
   const hw = useHardwareStatus();
 
   // "LIVE" only while the thermal camera really delivers frames - a stale
-  // "LIVE" badge would hide a sensor that stopped answering.
+  // "LIVE" badge would hide a sensor that stopped answering. A stale link is
+  // shown as "STALE", never as a hardware "OFFLINE".
   const live = hw.thermal === 'online' && Boolean(thermal?.ok);
+  const stale = hw.thermal === 'stale';
   // Real, measured frame rate of the sensor feed (never a hardcoded number).
   const fps = thermalFrame?.fps ?? thermal?.fps ?? null;
 
@@ -62,10 +64,10 @@ export function LiveFeed() {
         <div className="flex items-center gap-1.5 bg-white/10 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] font-bold text-white">
           <span
             className={`w-1.5 h-1.5 rounded-full ${
-              live ? 'bg-green-400 pulse-indicator' : 'bg-red-400'
+              live ? 'bg-green-400 pulse-indicator' : stale ? 'bg-amber-400' : 'bg-red-400'
             }`}
           />
-          <span>{live ? 'LIVE' : 'OFFLINE'}</span>
+          <span>{live ? 'LIVE' : stale ? 'STALE' : 'OFFLINE'}</span>
         </div>
       </div>
 

@@ -8,6 +8,7 @@ Never presents stale cached data as live.
 import time
 import json
 import os
+import urllib.request
 
 _CACHE_PATH = os.path.join(os.path.dirname(__file__), "weather_cache.json")
 _cache = {"data": None, "fetched_at": None, "source": None}
@@ -36,6 +37,40 @@ def update_weather(data: dict, source: str = "open-meteo"):
     _cache["fetched_at"] = time.time()
     _cache["source"] = source
     save_cache()
+
+
+def refresh_from_open_meteo(
+    latitude: float,
+    longitude: float,
+    timeout: float = 5.0,
+) -> bool:
+    """Try one bounded external refresh. Never raises, never blocks the caller.
+
+    This is the ONLY place the AERIS stack may talk to the internet for
+    weather. The dashboard reads the local cache through /api/weather, so the
+    UI keeps working with no WAN, no DNS and no CDN. Offline is a normal
+    state here: the function simply returns False.
+    """
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        "&current=temperature_2m,weather_code,wind_speed_10m"
+        "&timezone=Asia%2FManila"
+    )
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "AERIS-GroundStation/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        update_weather(payload, source="open-meteo")
+        return True
+    except Exception:
+        # Offline, DNS failure, timeout, malformed response - all normal.
+        return False
 
 
 def get_weather() -> dict:

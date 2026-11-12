@@ -80,6 +80,8 @@ interface AppState {
   devices: DeviceHealthMap;
   /** Client-side timestamp of the last hardware report (epoch ms). */
   hardwareUpdatedAt: number | null;
+  /** Client-side timestamp of the last message of any kind (epoch ms). */
+  lastMessageAt: number | null;
   /** State of the live link between the dashboard and the ground station. */
   linkState: LinkState;
   setHardwareData: (data: {
@@ -90,6 +92,8 @@ interface AppState {
     loraHardware?: LoraHardware | null;
   }) => void;
   setDevices: (devices: DeviceHealthMap) => void;
+  /** Record that the live channel delivered a message (heartbeat included). */
+  markMessageReceived: (timestamp?: number) => void;
   setLinkState: (state: LinkState) => void;
   /** Drop the cached hardware state (used when the live link is lost). */
   clearHardwareData: () => void;
@@ -213,10 +217,10 @@ export const useAppStore = create<AppState>()(
       },
 
       environment: {
-        temperature: 28,
-        condition: 'Partly Cloudy',
+        temperature: null,
+        condition: 'Unavailable (offline)',
         updatedAt: null,
-        source: 'Open-Meteo (live)',
+        source: 'Local weather cache',
       },
 
       thermal: null,
@@ -228,6 +232,7 @@ export const useAppStore = create<AppState>()(
       loraRx: null,
       devices: {},
       hardwareUpdatedAt: null,
+      lastMessageAt: null,
       linkState: 'connecting',
 
       settings: defaultSettings,
@@ -284,11 +289,18 @@ export const useAppStore = create<AppState>()(
 
       setDevices: (devices) => set({ devices }),
 
+      // Any frame - including the server heartbeat - proves the transport is
+      // alive. This is kept separate from hardwareUpdatedAt, which only a
+      // real hardware report may advance.
+      markMessageReceived: (timestamp) =>
+        set({ lastMessageAt: timestamp ?? Date.now(), linkState: 'live' }),
+
       setLinkState: (linkState) => set({ linkState }),
 
-      // When the live link is lost the cached hardware state must not be
-      // displayed any more: those values are no longer backed by a real
-      // measurement and would be shown as a stale "connected".
+      // Explicitly drop cached hardware state. This is NOT called on a mere
+      // link drop: a link problem must not erase the last measured device
+      // state, which is shown as "stale" instead. Use only when the operator
+      // deliberately wants a blank slate (e.g. signing out).
       clearHardwareData: () =>
         set({
           thermal: null,
