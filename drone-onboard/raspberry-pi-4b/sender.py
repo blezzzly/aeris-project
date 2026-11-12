@@ -202,12 +202,14 @@ class FastLoRaTransmitter(LoRa):
         # ground receiver programs lora_protocol.SYNC_WORD into Reg 0x39 and
         # reads it back to prove it.
         #
-        # pySX127x implements set_sync_word() as a NO-OP STUB (SX127x/LoRa.py):
-        # it returns the value without ever touching the register. The call
-        # is therefore kept for documentation and for a future library that
-        # implements it properly - it does NOT change the radio behaviour.
-        # The radio keeps the SX1276/78 silicon default 0x12, which is exactly
-        # what lora_protocol.SYNC_WORD defines.
+        # pySX127x implements set_sync_word() through its
+        # @setter(REG.LORA.SYNC_WORD) decorator (SX127x/LoRa.py): the decorated
+        # function only transforms the value, the decorator's wrapper performs
+        # the register write (spi.xfer([0x39 | 0x80, value])). The call below
+        # therefore DOES write RegSyncWord - it writes the same value the
+        # SX1276/78 would have used by default (0x12), so the radio's
+        # configuration is unchanged, but it is now explicit instead of
+        # implicit.
         self.set_sync_word(lora_protocol.SYNC_WORD)
 
     # Real TX state (surfaced to the ground station via status file; never treated as "connected" without ACK)

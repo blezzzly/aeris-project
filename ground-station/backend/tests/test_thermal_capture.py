@@ -18,6 +18,9 @@ import threading
 import time
 import unittest
 
+# The test bootstrap must run BEFORE the backend is imported.
+import _bootstrap  # noqa: F401
+
 import main
 from fakes import FakeI2C, FakeMLX90640
 

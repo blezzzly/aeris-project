@@ -12,6 +12,9 @@ The tests drive the real ConnectionManager with fake clients.
 import asyncio
 import unittest
 
+# The test bootstrap must run BEFORE the backend is imported.
+import _bootstrap  # noqa: F401
+
 import main
 from fakes import FakeWebSocket
 

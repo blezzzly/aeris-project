@@ -94,12 +94,13 @@ _IRQ_PAYLOAD_CRC_ERROR = 0x20
 # identical on the drone and on the ground: the SX1276/78 in LoRa mode only
 # accepts packets whose private network word matches its own.
 #
-# The drone transmitter cannot change its own sync word - pySX127x
-# implements set_sync_word() as a NO-OP STUB (SX127x/LoRa.py), so the drone
-# radio always keeps the SX1276/78 silicon default 0x12. The ground
-# receiver therefore programs 0x12; anything else made the two radios
-# unable to decode each other (observed: dio0_irq_count climbing while
-# rx_count stayed at 0 and crc_fail grew).
+# The drone transmitter sets the word explicitly from this same constant
+# (sender.py: set_sync_word(lora_protocol.SYNC_WORD)). pySX127x writes
+# Reg 0x39 through its @setter(REG.LORA.SYNC_WORD) decorator, so the value
+# in the drone radio is 0x12 - the same value the SX1276/78 uses by default.
+# The ground receiver therefore has to program 0x12 as well: anything else
+# made the two radios unable to decode each other (observed: dio0_irq_count
+# climbing while rx_count stayed at 0 and crc_fail grew).
 try:
     REG_WRITE_SYNC_WORD = int(_proto.SYNC_WORD)
 except Exception:  # pragma: no cover - the protocol module is always present

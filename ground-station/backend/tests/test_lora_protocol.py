@@ -14,6 +14,9 @@ import os
 import re
 import unittest
 
+# The test bootstrap must run BEFORE the backend is imported.
+import _bootstrap  # noqa: F401
+
 import lora_protocol
 import lora_rx_service
 from fakes import FakeSensors
@@ -124,7 +127,7 @@ class SyncWordConsistencyTests(unittest.TestCase):
 
     # ── L5: the drone side documents the (no-op) call ─────────────────────
     def test_l5_drone_transmitter_uses_the_shared_constant(self):
-        from tests import BACKEND_DIR
+        from _bootstrap import BACKEND_DIR
         project_root = os.path.dirname(os.path.dirname(BACKEND_DIR))
         sender = os.path.join(
             project_root, "drone-onboard", "raspberry-pi-4b", "sender.py",

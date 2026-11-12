@@ -10,9 +10,12 @@ asgi_harness.py - no httpx, no TestClient.
 """
 import unittest
 
+# The test bootstrap must run BEFORE the backend is imported.
+import _bootstrap  # noqa: F401
+
 import main
 from asgi_harness import ASGIClient
-from tests import TEST_OPERATOR_TOKEN, TEST_VIEWER_TOKEN
+from _bootstrap import TEST_OPERATOR_TOKEN, TEST_VIEWER_TOKEN
 
 
 class ThermalFeedAuthTests(unittest.TestCase):
@@ -136,7 +139,7 @@ class ThermalFeedAuthTests(unittest.TestCase):
     def test_w6c_the_real_token_file_is_never_touched(self):
         """The suite must use its own token, never the production one."""
         import os
-        from tests import BACKEND_DIR
+        from _bootstrap import BACKEND_DIR
         token_file = os.path.join(BACKEND_DIR, ".aeris_auth_token")
         self.assertTrue(
             os.environ.get("AERIS_AUTH_TOKEN"),

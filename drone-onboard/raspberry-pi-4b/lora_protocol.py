@@ -19,11 +19,15 @@ import zlib
 #
 # SYNC_WORD is the critical one. In LoRa mode the SX1276/78 only accepts a
 # packet whose private network word matches its own. pySX127x implements
-# set_sync_word() as a NO-OP STUB (SX127x/LoRa.py), so the drone radio can
-# never leave the silicon default 0x12. The ground receiver therefore has
-# to program 0x12 as well: programming anything else makes the two radios
-# unable to decode each other, which shows up as crc_fail climbing while
-# rx_count stays at zero.
+# set_sync_word() through its @setter(REG.LORA.SYNC_WORD) decorator
+# (SX127x/LoRa.py): the decorated function only transforms the value, while
+# the decorator's wrapper performs the actual register write
+# (spi.xfer([0x39 | 0x80, value])). The drone transmitter therefore sets
+# the word EXPLICITLY - and it writes the same value the SX1276/78 would
+# have used by default (0x12), so the radio's configuration is unchanged.
+# The ground receiver has to program the SAME value: anything else makes
+# the two radios unable to decode each other, which shows up as crc_fail
+# climbing while rx_count stays at zero.
 #
 # The drone transmitter's radio behaviour is NOT changed by these constants:
 # it keeps exactly the configuration it has today - 433 MHz, BW 500 kHz,

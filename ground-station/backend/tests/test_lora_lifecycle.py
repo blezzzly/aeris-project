@@ -13,6 +13,9 @@ import threading
 import time
 import unittest
 
+# The test bootstrap must run BEFORE the backend is imported.
+import _bootstrap  # noqa: F401
+
 import lora_rx_service
 from fakes import FakeSensors
 
